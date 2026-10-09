@@ -537,7 +537,7 @@ components:
         slug:
           type: string
           pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'
-          maxLength: 100
+          maxLength: 255
           description: Stable URL-friendly identifier.
           examples: [bistro-aetos]
         name:

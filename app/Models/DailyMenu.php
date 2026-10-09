@@ -17,7 +17,7 @@ use Illuminate\Support\Carbon;
 /**
  * A restaurant's lunch menu for one restaurant-local date.
  */
-#[Fillable(['restaurant_id', 'menu_date', 'status', 'served_from', 'served_until'])]
+#[Fillable(['restaurant_id', 'menu_date', 'status', 'published_at', 'served_from', 'served_until'])]
 class DailyMenu extends Model
 {
     /** @use HasFactory<DailyMenuFactory> */
@@ -33,6 +33,7 @@ class DailyMenu extends Model
         return [
             'menu_date' => 'date:Y-m-d',
             'status' => DailyMenuStatus::class,
+            'published_at' => 'datetime',
         ];
     }
 

@@ -31,6 +31,16 @@ class DailyMenuItemFactory extends Factory
         ];
     }
 
+    public function available(): static
+    {
+        return $this->state(['is_available' => true]);
+    }
+
+    public function withPrice(int $priceCents): static
+    {
+        return $this->state(['price_cents' => $priceCents]);
+    }
+
     public function unavailable(): static
     {
         return $this->state(['is_available' => false]);

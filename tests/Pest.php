@@ -1,6 +1,13 @@
 <?php
 
+use App\Models\DailyMenu;
+use App\Models\DailyMenuItem;
+use App\Models\Meal;
+use App\Models\Restaurant;
+use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Collection;
+use Illuminate\Testing\TestResponse;
 use Tests\TestCase;
 
 /*
@@ -44,7 +51,68 @@ expect()->extend('toBeOne', function () {
 |
 */
 
-function something()
+/**
+ * The current date in Sofia, which is "today" for every default test restaurant.
+ */
+function sofiaToday(): string
 {
-    // ..
+    return now('Europe/Sofia')->toDateString();
+}
+
+/**
+ * A published menu of an active restaurant, for today in Sofia unless a date is given.
+ */
+function publishedMenu(?Restaurant $restaurant = null, ?string $date = null): DailyMenu
+{
+    return DailyMenu::factory()
+        ->for($restaurant ?? Restaurant::factory()->active())
+        ->forDate($date ?? sofiaToday())
+        ->published()
+        ->create();
+}
+
+/**
+ * Adds a new meal of the menu's restaurant to the menu.
+ *
+ * @param  array<string, mixed>  $meal
+ * @param  array<string, mixed>  $item
+ */
+function addMeal(DailyMenu $menu, array $meal = [], array $item = []): DailyMenuItem
+{
+    $mealModel = Meal::factory()->for($menu->restaurant)->create($meal);
+
+    return DailyMenuItem::factory()->for($menu)->for($mealModel)->create($item);
+}
+
+/**
+ * @param  array<string, mixed>  $query
+ */
+function getTodayMeals(array $query = []): TestResponse
+{
+    return test()->getJson('/api/v1/meals/today'.($query ? '?'.http_build_query($query) : ''));
+}
+
+/**
+ * Meal ids in the order the BE-001 contract prescribes: round-robin rank per restaurant
+ * (position, then meal id), then SHA-256("{restaurant_id}:{date}"), then meal id.
+ *
+ * @param  Collection<int, DailyMenuItem>  $items
+ * @return list<int>
+ */
+function expectedRotation(Collection $items): array
+{
+    return EloquentCollection::make($items)->load('dailyMenu')
+        ->groupBy('restaurant_id')
+        ->flatMap(fn (Collection $restaurantItems) => $restaurantItems
+            ->sortBy([['position', 'asc'], ['meal_id', 'asc']])
+            ->values()
+            ->map(fn (DailyMenuItem $item, int $index) => [
+                'rank' => $index + 1,
+                'key' => hash('sha256', $item->restaurant_id.':'.$item->dailyMenu->menu_date->toDateString()),
+                'meal_id' => $item->meal_id,
+            ]))
+        ->sortBy([['rank', 'asc'], ['key', 'asc'], ['meal_id', 'asc']])
+        ->pluck('meal_id')
+        ->values()
+        ->all();
 }

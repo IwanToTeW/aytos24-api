@@ -25,8 +25,19 @@ class MealFactory extends Factory
             'name' => ucfirst(fake()->words(3, true)),
             'description' => fake()->optional()->sentence(),
             'portion' => fake()->optional()->randomElement(['300 г', '350 г', '400 г', '350 мл']),
+            'image_path' => fake()->boolean() ? 'meals/'.fake()->uuid().'.jpg' : null,
             'is_active' => true,
         ];
+    }
+
+    public function active(): static
+    {
+        return $this->state(['is_active' => true]);
+    }
+
+    public function forRestaurant(Restaurant $restaurant): static
+    {
+        return $this->for($restaurant);
     }
 
     public function inactive(): static

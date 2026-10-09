@@ -23,8 +23,9 @@ class RestaurantFactory extends Factory
         return [
             'name' => $name,
             'slug' => Str::slug($name).'-'.fake()->unique()->numberBetween(1, 999_999),
-            'description' => fake()->optional()->sentence(),
-            'phone' => fake()->optional()->numerify('+359 558 #####'),
+            'description' => fake()->sentence(),
+            // 000 is not a Bulgarian area code, so generated numbers can never reach a real phone.
+            'phone' => fake()->optional()->numerify('+359 000 000 ###'),
             'address' => fake()->optional()->streetAddress(),
             'timezone' => 'Europe/Sofia',
             'is_active' => false,
@@ -34,5 +35,10 @@ class RestaurantFactory extends Factory
     public function active(): static
     {
         return $this->state(['is_active' => true]);
+    }
+
+    public function inactive(): static
+    {
+        return $this->state(['is_active' => false]);
     }
 }

@@ -14,7 +14,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 /**
  * A reusable dish offered by one restaurant. Its price is set per day on DailyMenuItem.
  */
-#[Fillable(['restaurant_id', 'meal_category_id', 'name', 'description', 'portion', 'is_active'])]
+#[Fillable(['restaurant_id', 'meal_category_id', 'name', 'description', 'portion', 'image_path', 'is_active'])]
 class Meal extends Model
 {
     /** @use HasFactory<MealFactory> */
