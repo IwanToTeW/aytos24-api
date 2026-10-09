@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Export the OpenAPI spec from Scramble and copy it into the front-end repo.
+#
+# Usage: bin/sync-api-spec [path-to-frontend-repo]
+#   The front-end path defaults to $FRONTEND_PATH, then ../aytos24-app.
+set -euo pipefail
+
+API_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+FRONTEND_PATH="${1:-${FRONTEND_PATH:-$API_ROOT/../aytos24-app}}"
+SPEC="docs/openapi.json"
+
+if [ ! -d "$FRONTEND_PATH" ]; then
+    echo "Front-end repo not found at: $FRONTEND_PATH" >&2
+    echo "Pass the path as an argument or set FRONTEND_PATH." >&2
+    exit 1
+fi
+
+cd "$API_ROOT"
+docker compose exec -T app php artisan scramble:export --path="$SPEC"
+
+mkdir -p "$FRONTEND_PATH/docs"
+cp "$SPEC" "$FRONTEND_PATH/$SPEC"
+
+echo "Synced $SPEC -> $(cd "$FRONTEND_PATH" && pwd)/$SPEC"
