@@ -1,0 +1,21 @@
+# OpenAPI lint rules for docs/api/openapi.yaml. Run with: bin/lint-api-spec
+extends:
+  - recommended
+
+rules:
+  # Examples must match their schemas exactly, including no undeclared properties.
+  no-invalid-media-type-examples:
+    severity: error
+    allowAdditionalProperties: false
+  no-invalid-schema-examples:
+    severity: error
+    allowAdditionalProperties: false
+  no-invalid-parameter-examples: error
+  no-unresolved-refs: error
+  no-unused-components: error
+  operation-operationId: error
+  # Proprietary API: no public licence to declare.
+  info-license: off
+  info-license-url: off
+  # No deployed environment yet; the only server is the local Docker stack.
+  no-server-example.com: off

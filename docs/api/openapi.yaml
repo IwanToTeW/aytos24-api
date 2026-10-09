@@ -1,0 +1,646 @@
+openapi: 3.1.0
+
+info:
+  title: Aytos24 API
+  version: 1.0.0
+  summary: Public REST API for Aytos24, the local platform for Aytos, Bulgaria.
+  description: |
+    The Aytos24 API powers meal-first food discovery: users browse today's
+    lunch meals from all participating restaurants in Aytos, filter by
+    category, search for dishes and compare prices, without any restaurant
+    being favoured.
+
+    ## Conventions
+
+    - **Versioning.** Every public endpoint lives under `/api/v1/`. Breaking
+      changes are only introduced under a new version prefix. Within `v1`,
+      new fields may be added to responses, so clients must ignore unknown
+      properties.
+    - **Format.** Requests and responses use JSON (`application/json`,
+      UTF-8). Clients should send `Accept: application/json`; with it,
+      every response, including errors, is JSON.
+    - **Field naming.** Property names and query parameters use `snake_case`.
+    - **Nullable fields.** A nullable field is always present in the response
+      with a `null` value; it is never omitted.
+    - **Content language.** Meal, category and restaurant text is returned as
+      entered by restaurants (normally Bulgarian, Cyrillic). It is not
+      translated by the API.
+
+    ## Authentication
+
+    All endpoints in this document are public and read-only. No
+    authentication is required, and no credentials, cookies or API keys
+    should be sent.
+
+    ## Prices
+
+    All prices are in euro (EUR), Bulgaria's currency since 1 January 2026.
+    Prices are represented as an integer number of **euro cents** together
+    with an ISO 4217 currency code, for example `{"amount": 690, "currency":
+    "EUR"}` for €6.90. Floating-point values are never used for money.
+    Formatting for display (for example `6,90 €` in Bulgarian) is the
+    client's responsibility, e.g. with `Intl.NumberFormat`.
+
+    ## Dates, times and restaurant time zones
+
+    Each restaurant has an IANA time zone (currently `Europe/Sofia` for every
+    restaurant in Aytos). "Today" for a meal means the current calendar date
+    in its restaurant's time zone, not the server's or the client's.
+    Date-only values use `YYYY-MM-DD`. Timestamps use RFC 3339 with the
+    restaurant's UTC offset, for example `2026-10-09T11:30:00+03:00`
+    (summer) or `2026-12-01T11:30:00+02:00` (winter).
+
+    ## Errors
+
+    Every error response has a human-readable `message`. Validation errors
+    additionally list the invalid fields under `errors`. Server errors never
+    expose stack traces, exception names, SQL or other internal details.
+
+    ## Rate limiting
+
+    Public endpoints are limited to **60 requests per minute per client IP
+    address**. Each response carries `X-RateLimit-Limit` and
+    `X-RateLimit-Remaining` headers. When the limit is exceeded the API
+    responds with `429 Too Many Requests` and a `Retry-After` header giving
+    the number of seconds to wait.
+  contact:
+    name: Aytos24
+
+servers:
+  - url: http://localhost:8000/api
+    description: Local Docker development environment
+
+security: []
+
+tags:
+  - name: Meals
+    description: Daily lunch menu discovery across all participating restaurants.
+
+paths:
+  /v1/meals/today:
+    get:
+      tags: [Meals]
+      operationId: listTodayMeals
+      summary: List today's lunch meals
+      description: |
+        Returns a paginated list of the lunch meals offered today by all
+        participating restaurants. The endpoint is public, read-only and
+        requires no authentication.
+
+        ## Availability rules
+
+        A meal is included only when **all** of the following are true:
+
+        1. It is on its restaurant's daily menu for today, where "today" is
+           the current date in the restaurant's time zone (`available_on`
+           equals that date).
+        2. The meal is active (not withdrawn by the restaurant).
+        3. Its restaurant is active on Aytos24.
+        4. Its category is active.
+
+        Meals stay in the list for the **whole local calendar day**, even
+        after their serving window (`served_until`) has passed. This keeps
+        pagination stable during the day; clients can use `served_from` and
+        `served_until` to show whether a meal is currently being served. At
+        local midnight the list switches to the next day's menus.
+
+        ## Inactive and unknown categories
+
+        Meals whose category is inactive are excluded from every response,
+        with or without a `category` filter. Filtering by a category slug
+        that is inactive or does not exist is not an error: the response is
+        `200` with an empty `data` array. Only a syntactically invalid slug
+        returns `422`.
+
+        ## Search
+
+        `search` is trimmed and then matched case-insensitively as a single
+        substring against each meal's `name` and `description`. A meal
+        matches if either field contains the term. Cyrillic and Latin input
+        are both supported; there is no transliteration, so `musaka` does not
+        match `Мусака`. An empty or whitespace-only value is treated as if
+        the parameter were absent.
+
+        `category` and `search` may be combined; a meal must satisfy both.
+
+        ## Neutral restaurant ordering
+
+        Results are ordered so that no restaurant is consistently favoured,
+        and so that restaurants with many dishes do not crowd out those with
+        few. After filtering, meals are ordered by:
+
+        1. **Round-robin rank.** Each restaurant's matching meals are ranked
+           1, 2, 3… in the restaurant's own menu order (menu position, then
+           meal `id`). All rank-1 meals come first, then all rank-2 meals,
+           and so on, so page 1 shows one dish from as many restaurants as
+           possible.
+        2. **Daily restaurant rotation.** Within the same rank, restaurants
+           are ordered by `SHA-256("{restaurant_id}:{YYYY-MM-DD}")` (the
+           lowercase hex digest, compared as a string) using the local date.
+           This shuffles restaurants deterministically, so the order changes
+           every day but is stable for the whole day.
+        3. **Meal `id`**, ascending, as a final tie-breaker.
+
+        The order is identical for every client, does not depend on
+        payment, popularity or any other per-restaurant setting, and is
+        stable across pages for a given date and filter combination.
+        Clients must not rely on any particular order beyond these
+        guarantees. Sorting by price is not supported in v1.
+
+        ## Pagination
+
+        Results are paginated with `page` and `per_page`. A `page` beyond
+        the last page returns `200` with an empty `data` array and accurate
+        `meta`. When there are no results, `total` is `0` and `last_page` is
+        `1`.
+
+        ## Validation rules
+
+        | Parameter | Rules |
+        | --- | --- |
+        | `category` | optional; string; 1–100 characters; lowercase slug matching `^[a-z0-9]+(?:-[a-z0-9]+)*$` |
+        | `search` | optional; string; 2–100 characters after trimming; empty or whitespace-only is ignored |
+        | `page` | optional; integer; minimum 1; default 1 |
+        | `per_page` | optional; integer; 1–50; default 20 |
+
+        Unknown query parameters are ignored. Any rule violation returns
+        `422` listing every invalid parameter.
+      parameters:
+        - $ref: '#/components/parameters/CategoryFilter'
+        - $ref: '#/components/parameters/Search'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200':
+          description: |
+            Today's meals matching the filters. An empty result is still a
+            successful `200` response.
+          headers:
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/X-RateLimit-Remaining'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MealCollection'
+              examples:
+                today:
+                  summary: First page of today's meals
+                  value:
+                    data:
+                      - id: 1042
+                        name: Пилешка супа
+                        description: Домашна пилешка супа с фиде и застройка.
+                        portion: 350 мл
+                        price:
+                          amount: 350
+                          currency: EUR
+                        image_url: null
+                        available_on: '2026-10-09'
+                        served_from: '2026-10-09T11:30:00+03:00'
+                        served_until: '2026-10-09T15:00:00+03:00'
+                        category:
+                          id: 1
+                          slug: soups
+                          name: Супи
+                        restaurant:
+                          id: 7
+                          slug: bistro-aetos
+                          name: Бистро Аетос
+                          address: ул. Цар Освободител 12, Айтос
+                          logo_url: null
+                          timezone: Europe/Sofia
+                      - id: 1108
+                        name: Мусака
+                        description: Класическа мусака с картофи и кайма.
+                        portion: 400 г
+                        price:
+                          amount: 690
+                          currency: EUR
+                        image_url: http://localhost:8000/storage/meals/1108.jpg
+                        available_on: '2026-10-09'
+                        served_from: '2026-10-09T12:00:00+03:00'
+                        served_until: '2026-10-09T14:30:00+03:00'
+                        category:
+                          id: 2
+                          slug: main-dishes
+                          name: Основни ястия
+                        restaurant:
+                          id: 3
+                          slug: mehana-chinarite
+                          name: Механа Чинарите
+                          address: null
+                          logo_url: http://localhost:8000/storage/restaurants/3/logo.png
+                          timezone: Europe/Sofia
+                      - id: 1077
+                        name: Шопска салата
+                        description: null
+                        portion: 300 г
+                        price:
+                          amount: 420
+                          currency: EUR
+                        image_url: null
+                        available_on: '2026-10-09'
+                        served_from: null
+                        served_until: null
+                        category:
+                          id: 3
+                          slug: salads
+                          name: Салати
+                        restaurant:
+                          id: 5
+                          slug: restorant-tsentral
+                          name: Ресторант Централ
+                          address: пл. Свобода 1, Айтос
+                          logo_url: null
+                          timezone: Europe/Sofia
+                    meta:
+                      current_page: 1
+                      per_page: 20
+                      total: 3
+                      last_page: 1
+                empty:
+                  summary: No meals match (or no menus published yet today)
+                  value:
+                    data: []
+                    meta:
+                      current_page: 1
+                      per_page: 20
+                      total: 0
+                      last_page: 1
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+components:
+  parameters:
+    CategoryFilter:
+      name: category
+      in: query
+      required: false
+      description: |
+        Only return meals in the category with this slug. An unknown or
+        inactive slug returns an empty result, not an error.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 100
+        pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'
+      example: soups
+    Search:
+      name: search
+      in: query
+      required: false
+      description: |
+        Case-insensitive substring search in meal names and descriptions.
+        Trimmed before validation; empty or whitespace-only values are
+        ignored. Must be 2–100 characters after trimming.
+      schema:
+        type: string
+        minLength: 2
+        maxLength: 100
+      example: мусака
+    Page:
+      name: page
+      in: query
+      required: false
+      description: Page number, starting at 1.
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+      example: 1
+    PerPage:
+      name: per_page
+      in: query
+      required: false
+      description: Number of meals per page.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 50
+        default: 20
+      example: 20
+
+  headers:
+    X-RateLimit-Limit:
+      description: Maximum number of requests allowed per minute.
+      schema:
+        type: integer
+        minimum: 1
+      example: 60
+    X-RateLimit-Remaining:
+      description: Requests remaining in the current one-minute window.
+      schema:
+        type: integer
+        minimum: 0
+      example: 59
+    Retry-After:
+      description: Seconds to wait before making another request.
+      schema:
+        type: integer
+        minimum: 1
+      example: 30
+
+  responses:
+    ValidationFailed:
+      description: |
+        One or more query parameters are invalid. `errors` contains an entry
+        for every invalid parameter, keyed by parameter name.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationError'
+          examples:
+            perPageTooLarge:
+              summary: per_page above the maximum
+              value:
+                message: The per page field must not be greater than 50.
+                errors:
+                  per_page:
+                    - The per page field must not be greater than 50.
+            multipleFields:
+              summary: Several invalid parameters
+              value:
+                message: The category field format is invalid. (and 1 more error)
+                errors:
+                  category:
+                    - The category field format is invalid.
+                  page:
+                    - The page field must be an integer.
+    TooManyRequests:
+      description: The client exceeded the rate limit.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/Retry-After'
+        X-RateLimit-Limit:
+          $ref: '#/components/headers/X-RateLimit-Limit'
+        X-RateLimit-Remaining:
+          $ref: '#/components/headers/X-RateLimit-Remaining'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/RateLimitError'
+          examples:
+            tooManyAttempts:
+              summary: Rate limit exceeded
+              value:
+                message: Too Many Attempts.
+    ServerError:
+      description: |
+        An unexpected error occurred. The body never contains stack traces,
+        exception details or other internal information.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ServerError'
+          examples:
+            serverError:
+              summary: Unexpected server error
+              value:
+                message: Server Error
+    ServiceUnavailable:
+      description: The API is temporarily unavailable, for example during maintenance.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ServerError'
+          examples:
+            maintenance:
+              summary: Maintenance mode
+              value:
+                message: Service Unavailable
+
+  schemas:
+    MealCollection:
+      type: object
+      description: A page of meals with pagination metadata.
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Meal'
+        meta:
+          $ref: '#/components/schemas/PaginationMeta'
+
+    Meal:
+      type: object
+      description: A dish on a restaurant's daily lunch menu.
+      required:
+        - id
+        - name
+        - description
+        - portion
+        - price
+        - image_url
+        - available_on
+        - served_from
+        - served_until
+        - category
+        - restaurant
+      properties:
+        id:
+          type: integer
+          minimum: 1
+          description: Unique meal identifier.
+          examples: [1042]
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Dish name as shown on the menu.
+          examples: [Мусака]
+        description:
+          type: [string, 'null']
+          maxLength: 1000
+          description: Optional dish description or ingredients.
+          examples: [Класическа мусака с картофи и кайма.]
+        portion:
+          type: [string, 'null']
+          maxLength: 50
+          description: |
+            Portion size as written on the restaurant's menu (for example
+            `400 г` or `350 мл`), or `null` if not provided. Free text;
+            not normalised.
+          examples: [400 г]
+        price:
+          $ref: '#/components/schemas/Price'
+        image_url:
+          type: [string, 'null']
+          format: uri
+          description: Absolute URL of a dish photo, or `null` if there is none.
+        available_on:
+          type: string
+          format: date
+          description: The restaurant-local date this meal is offered on (`YYYY-MM-DD`).
+          examples: ['2026-10-09']
+        served_from:
+          type: [string, 'null']
+          format: date-time
+          description: |
+            Start of the serving window, RFC 3339 with the restaurant's UTC
+            offset. `null` when the restaurant has not specified one.
+          examples: ['2026-10-09T11:30:00+03:00']
+        served_until:
+          type: [string, 'null']
+          format: date-time
+          description: |
+            End of the serving window, RFC 3339 with the restaurant's UTC
+            offset. `null` when the restaurant has not specified one. The
+            meal stays listed after this time until local midnight.
+          examples: ['2026-10-09T15:00:00+03:00']
+        category:
+          $ref: '#/components/schemas/MealCategory'
+        restaurant:
+          $ref: '#/components/schemas/RestaurantSummary'
+
+    MealCategory:
+      type: object
+      description: |
+        A meal category used for filtering. Only active categories appear in
+        responses.
+      required: [id, slug, name]
+      properties:
+        id:
+          type: integer
+          minimum: 1
+          examples: [1]
+        slug:
+          type: string
+          pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'
+          maxLength: 100
+          description: Stable identifier used in the `category` query parameter.
+          examples: [soups]
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Display name.
+          examples: [Супи]
+
+    RestaurantSummary:
+      type: object
+      description: The restaurant that offers a meal (restaurant attribution).
+      required: [id, slug, name, address, logo_url, timezone]
+      properties:
+        id:
+          type: integer
+          minimum: 1
+          examples: [7]
+        slug:
+          type: string
+          pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'
+          maxLength: 100
+          description: Stable URL-friendly identifier.
+          examples: [bistro-aetos]
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          examples: [Бистро Аетос]
+        address:
+          type: [string, 'null']
+          maxLength: 255
+          description: Street address, or `null` if not provided.
+          examples: [ул. Цар Освободител 12, Айтос]
+        logo_url:
+          type: [string, 'null']
+          format: uri
+          description: Absolute URL of the restaurant logo, or `null`.
+        timezone:
+          type: string
+          description: |
+            IANA time zone the restaurant operates in. Determines what
+            "today" means for its meals and the offset of its timestamps.
+          examples: [Europe/Sofia]
+
+    Price:
+      type: object
+      description: A monetary amount in integer minor units.
+      required: [amount, currency]
+      properties:
+        amount:
+          type: integer
+          minimum: 0
+          description: Amount in euro cents (e.g. `690` = €6.90).
+          examples: [690]
+        currency:
+          type: string
+          const: EUR
+          description: ISO 4217 currency code. Always `EUR`.
+
+    PaginationMeta:
+      type: object
+      description: Pagination metadata for a list response.
+      required: [current_page, per_page, total, last_page]
+      properties:
+        current_page:
+          type: integer
+          minimum: 1
+          description: The requested page number.
+          examples: [1]
+        per_page:
+          type: integer
+          minimum: 1
+          maximum: 50
+          description: The page size used for this response.
+          examples: [20]
+        total:
+          type: integer
+          minimum: 0
+          description: Total number of matching meals across all pages.
+          examples: [0]
+        last_page:
+          type: integer
+          minimum: 1
+          description: Number of the last page. `1` when there are no results.
+          examples: [1]
+
+    ValidationError:
+      type: object
+      description: Returned with `422` when request parameters fail validation.
+      required: [message, errors]
+      properties:
+        message:
+          type: string
+          description: |
+            Summary of the first error, with a count of any others. For
+            display or logging only; use `errors` to identify fields.
+        errors:
+          type: object
+          description: |
+            Map of invalid field name to one or more error messages for that
+            field.
+          minProperties: 1
+          additionalProperties:
+            type: array
+            minItems: 1
+            items:
+              type: string
+
+    RateLimitError:
+      type: object
+      description: Returned with `429` when the client exceeds the rate limit.
+      required: [message]
+      properties:
+        message:
+          type: string
+          description: Human-readable explanation. See the `Retry-After` header.
+
+    ServerError:
+      type: object
+      description: |
+        Returned with `5xx` status codes. Contains only a generic message;
+        no stack traces or implementation details.
+      required: [message]
+      properties:
+        message:
+          type: string
+          description: Generic human-readable error message.
