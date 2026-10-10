@@ -10,6 +10,7 @@ The frontend (aytos24-app) runs live API integration tests — `npm run test:liv
 | Database | `laravel` | `e2e` (same MySQL server, dedicated database) |
 | `APP_ENV` | `local` | `testing` |
 | Rate limiting | 60/min per IP | none (`CACHE_STORE=array`) |
+| Sessions | database | database (`e2e`), required for Sanctum |
 | CORS origins | `CORS_ALLOWED_ORIGINS` (default `http://localhost:5173`) | `E2E_CORS_ALLOWED_ORIGINS` (default `http://localhost:5175`) |
 
 ## Start and seed

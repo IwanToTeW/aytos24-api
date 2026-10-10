@@ -10,6 +10,7 @@ use App\Http\Controllers\Api\V1\Auth\ResetPasswordController;
 use App\Http\Controllers\Api\V1\Auth\VerifyEmailController;
 use App\Http\Controllers\Api\V1\HelloController;
 use App\Http\Controllers\Api\V1\TodayMealController;
+use App\Http\Middleware\EnsureCustomerIsVerified;
 use App\Http\Middleware\SetLocaleFromAcceptLanguage;
 use Illuminate\Support\Facades\Route;
 use Laravel\Sanctum\Http\Middleware\EnsureFrontendRequestsAreStateful;
@@ -38,8 +39,10 @@ Route::prefix('v1')->group(function () {
                 ->middleware('auth:sanctum')
                 ->name('logout');
 
+            // Customer-only endpoints add EnsureCustomerIsVerified after auth:sanctum. Logout does
+            // not, so a session from before the verification-first policy can still be ended.
             Route::get('user', CurrentCustomerController::class)
-                ->middleware('auth:sanctum')
+                ->middleware(['auth:sanctum', EnsureCustomerIsVerified::class])
                 ->name('user');
 
             Route::post('forgot-password', ForgotPasswordController::class)
@@ -55,7 +58,7 @@ Route::prefix('v1')->group(function () {
                 ->name('verify-email');
 
             Route::post('email/verification-notification', EmailVerificationNotificationController::class)
-                ->middleware(['auth:sanctum', 'throttle:verification-notification'])
+                ->middleware('throttle:verification-notification')
                 ->name('verification-notification');
         });
 });

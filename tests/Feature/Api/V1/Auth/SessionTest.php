@@ -1,10 +1,12 @@
 <?php
 
+use App\Http\Middleware\EnsureCustomerIsVerified;
 use App\Http\Resources\V1\CustomerResource;
 use App\Models\User;
 use Illuminate\Cookie\CookieValuePrefix;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Str;
 use Tests\Support\Browser;
@@ -13,7 +15,7 @@ use Tests\Support\OpenApiContract;
 // Current customer
 
 test('a signed-in customer can retrieve their account', function () {
-    $customer = customer(['email_verified_at' => null]);
+    $customer = customer();
     $browser = browser();
     $browser->login('ivan@example.com');
 
@@ -230,8 +232,69 @@ test('only customer endpoints require authentication', function () {
     expect($protected)->toEqualCanonicalizing([
         'POST api/v1/auth/logout',
         'GET|HEAD api/v1/auth/user',
-        'POST api/v1/auth/email/verification-notification',
     ]);
+});
+
+test('customer endpoints additionally require a verified email, logout does not', function () {
+    $verified = fn (string $name) => in_array(EnsureCustomerIsVerified::class, Route::getRoutes()->getByName($name)->gatherMiddleware(), true);
+
+    expect($verified('api.v1.auth.user'))->toBeTrue()
+        ->and($verified('api.v1.auth.logout'))->toBeFalse();
+});
+
+// Verification-first policy
+
+test('the browser that registered has no authenticated session afterwards', function () {
+    Notification::fake();
+    $browser = browser();
+    $browser->initialiseCsrf();
+
+    $browser->post('/api/v1/auth/register', registrationPayload())->assertCreated();
+
+    $browser->get('/api/v1/auth/user')->assertUnauthorized();
+    // Nor can the new, unverified customer sign in yet.
+    $browser->login('ivan@example.com')->assertForbidden();
+});
+
+test('a session of a customer whose email is not verified is ended and answered 401', function () {
+    config(['app.debug' => false]);
+    $customer = customer();
+    $browser = browser();
+    $browser->login('ivan@example.com')->assertOk();
+    $sessionId = $browser->sessionId();
+
+    // A session from before the policy (or an email that became unverified).
+    $customer->forceFill(['email_verified_at' => null])->save();
+
+    $response = $browser->get('/api/v1/auth/user')
+        ->assertUnauthorized()
+        ->assertExactJson(['message' => 'Unauthenticated.']);
+
+    OpenApiContract::assertResponseMatches($response, '/v1/auth/user');
+    expect(DB::table('sessions')->where('id', $sessionId)->exists())->toBeFalse();
+
+    // The session is gone for good, even after the email is verified.
+    $customer->markEmailAsVerified();
+    $browser->get('/api/v1/auth/user')->assertUnauthorized();
+});
+
+test('a remember-me cookie of an unverified customer does not restore a session', function () {
+    $customer = customer();
+    $browser = browser();
+    $browser->login('ivan@example.com', extra: ['remember' => true])->assertOk();
+    $customer->forceFill(['email_verified_at' => null])->save();
+
+    $browser->get('/api/v1/auth/user')->assertUnauthorized();
+    $browser->get('/api/v1/auth/user')->assertUnauthorized();
+});
+
+test('an unverified customer\'s legacy session can still log out', function () {
+    $customer = customer();
+    $browser = browser();
+    $browser->login('ivan@example.com')->assertOk();
+    $customer->forceFill(['email_verified_at' => null])->save();
+
+    $browser->post('/api/v1/auth/logout')->assertNoContent();
 });
 
 test('guests can still browse meals while authentication is in use', function () {

@@ -28,13 +28,13 @@ function agreedAuthEndpoints(): array
     return [
         'csrf cookie' => ['get', '/sanctum/csrf-cookie', 'guest', [204, 429]],
         'register' => ['post', '/v1/auth/register', 'guest', [201, 419, 422, 429, 500]],
-        'login' => ['post', '/v1/auth/login', 'guest', [200, 419, 422, 429, 500]],
+        'login' => ['post', '/v1/auth/login', 'guest', [200, 403, 419, 422, 429, 500]],
         'logout' => ['post', '/v1/auth/logout', 'required', [204, 401, 419, 429, 500]],
         'current user' => ['get', '/v1/auth/user', 'required', [200, 401, 429, 500]],
         'forgot password' => ['post', '/v1/auth/forgot-password', 'guest', [200, 419, 422, 429, 500]],
         'reset password' => ['post', '/v1/auth/reset-password', 'guest', [200, 419, 422, 429, 500]],
         'verify email' => ['get', '/v1/auth/verify-email/{id}/{hash}', 'signed', [302, 429]],
-        'resend verification' => ['post', '/v1/auth/email/verification-notification', 'required', [202, 401, 419, 429, 500]],
+        'resend verification' => ['post', '/v1/auth/email/verification-notification', 'guest', [200, 419, 422, 429, 500]],
         'social redirect' => ['get', '/v1/auth/social/{provider}/redirect', 'guest', [302, 404, 429]],
         'social callback (query)' => ['get', '/v1/auth/social/{provider}/callback', 'guest', [303, 404, 429]],
         'social callback (form post)' => ['post', '/v1/auth/social/{provider}/callback', 'guest', [303, 404, 429]],
@@ -213,14 +213,16 @@ test('every example in the contract is valid against its schema', function () {
 
 test('every endpoint that returns a customer uses the one shared customer resource', function () {
     $returningCustomer = [];
-    // Password recovery (BE-009) confirms with a message and never returns the customer.
+    // Password recovery, verification resend and (verification-first) registration confirm with a
+    // message and never return the customer.
     $returningMessage = [];
+    $messageSchemas = ['#/components/schemas/Message', '#/components/schemas/RegistrationAccepted'];
 
     foreach (contractOperations() as ['method' => $method, 'path' => $path, 'operation' => $operation]) {
         foreach ($operation['responses'] as $status => $response) {
             $schema = contractResolve($response)['content']['application/json']['schema'] ?? null;
 
-            if ($status < 300 && $schema === ['$ref' => '#/components/schemas/Message']) {
+            if ($status < 300 && in_array($schema['$ref'] ?? null, $messageSchemas, true)) {
                 $returningMessage[] = "{$method} {$path} {$status}";
             } elseif ($status < 300 && $schema !== null) {
                 expect($schema)->toBe(['$ref' => '#/components/schemas/CustomerResource']);
@@ -230,12 +232,13 @@ test('every endpoint that returns a customer uses the one shared customer resour
     }
 
     expect($returningMessage)->toEqualCanonicalizing([
+        'post /v1/auth/register 201',
+        'post /v1/auth/email/verification-notification 200',
         'post /v1/auth/forgot-password 200',
         'post /v1/auth/reset-password 200',
     ]);
 
     expect($returningCustomer)->toEqualCanonicalizing([
-        'post /v1/auth/register 201',
         'post /v1/auth/login 200',
         'get /v1/auth/user 200',
         'get /v1/me 200',

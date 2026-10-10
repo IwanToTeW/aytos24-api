@@ -10,25 +10,19 @@ use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Exceptions;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Notification;
-use Illuminate\Support\Str;
 use Tests\Support\OpenApiContract;
 
 beforeEach(fn () => $this->travelTo('2026-10-10 09:00:00'));
 
-test('a guest can register and receives the customer resource', function () {
+test('a guest can register and is told to verify the email before signing in', function () {
     Notification::fake();
 
     $response = registerCustomer()->assertCreated();
 
-    $customer = User::sole();
-    expect($response->json())->toBe(['data' => [
-        'id' => $customer->id,
-        'name' => 'Ivan',
-        'email' => 'ivan@example.com',
-        'email_verified' => false,
-        'phone' => null,
-        'created_at' => '2026-10-10T09:00:00Z',
-    ]]);
+    expect($response->json())->toBe([
+        'message' => 'Your account has been created. Check your email and verify your address before signing in.',
+        'verification_required' => true,
+    ])->and(User::sole()->email)->toBe('ivan@example.com');
     OpenApiContract::assertResponseMatches($response, '/v1/auth/register', 'post');
 });
 
@@ -49,12 +43,9 @@ test('the customer is stored unverified, without phone, with a hashed password',
 test('name and email are trimmed and the email is lowercased', function () {
     Notification::fake();
 
-    registerCustomer(['name' => '  Ivan Totev  ', 'email' => '  Ivan.Totev@Example.COM '])
-        ->assertCreated()
-        ->assertJsonPath('data.name', 'Ivan Totev')
-        ->assertJsonPath('data.email', 'ivan.totev@example.com');
+    registerCustomer(['name' => '  Ivan Totev  ', 'email' => '  Ivan.Totev@Example.COM '])->assertCreated();
 
-    expect(User::sole()->email)->toBe('ivan.totev@example.com');
+    expect(User::sole()->only(['name', 'email']))->toBe(['name' => 'Ivan Totev', 'email' => 'ivan.totev@example.com']);
 });
 
 test('registration needs no phone, address or date of birth', function () {
@@ -65,43 +56,29 @@ test('registration needs no phone, address or date of birth', function () {
     expect(User::count())->toBe(1);
 });
 
-test('registration signs the customer in with a session from the web app', function () {
+test('registration does not sign the customer in (verification-first)', function () {
     Notification::fake();
 
-    registerCustomer()->assertCreated()->assertCookie(config('session.cookie'));
+    registerCustomer()->assertCreated();
 
-    $this->assertAuthenticatedAs(User::sole(), 'web');
+    $this->assertGuest('web');
 });
 
-test('the session identifier is regenerated on registration', function () {
-    Notification::fake();
-    $before = Str::random(40);
-
-    $response = $this->withCookie(config('session.cookie'), $before)->postJson('/api/v1/auth/register', registrationPayload(), frontendHeaders())
-        ->assertCreated();
-
-    $after = $response->getCookie(config('session.cookie'))->getValue();
-    expect($after)->not->toBe($before)->toHaveLength(40);
-});
-
-test('remember sets a remember-me cookie, otherwise none is set', function () {
+test('registration never sets a remember-me cookie, even with remember', function () {
     Notification::fake();
     $recaller = Auth::guard('web')->getRecallerName();
 
-    registerCustomer()->assertCreated()->assertCookieMissing($recaller);
-
-    Auth::guard('web')->logout();
-    registerCustomer(['email' => 'maria@example.com', 'remember' => true])->assertCreated()->assertCookie($recaller);
+    registerCustomer(['remember' => true])->assertCreated()->assertCookieMissing($recaller);
 });
 
-test('registering while signed in replaces the previous customer', function () {
+test('registering while signed in neither signs in the new customer nor changes the current session', function () {
     Notification::fake();
     $previous = User::factory()->create();
 
     $this->actingAs($previous, 'web');
     registerCustomer()->assertCreated();
 
-    $this->assertAuthenticatedAs(User::where('email', 'ivan@example.com')->sole(), 'web');
+    $this->assertAuthenticatedAs($previous, 'web');
 });
 
 test('registration without a web app session creates the account but no session or token', function () {
@@ -111,7 +88,7 @@ test('registration without a web app session creates the account but no session 
     $response = $this->postJson('/api/v1/auth/register', registrationPayload())->assertCreated();
 
     $response->assertCookieMissing(config('session.cookie'));
-    expect($response->json('data'))->not->toHaveKey('token')
+    expect($response->json())->not->toHaveKey('token')
         ->and(User::count())->toBe(1);
     $this->assertGuest('web');
 });
@@ -159,11 +136,11 @@ test('the response never contains the password or remember token', function () {
 
     $response = registerCustomer(['remember' => true])->assertCreated();
 
-    expect(array_keys($response->json('data')))->toBe(['id', 'name', 'email', 'email_verified', 'phone', 'created_at'])
+    expect(array_keys($response->json()))->toBe(['message', 'verification_required'])
         ->and($response->getContent())
         ->not->toContain('ExamplePassword123!')
-        ->not->toContain(User::sole()->getAuthPassword())
-        ->not->toContain((string) User::sole()->getRememberToken());
+        ->not->toContain(User::sole()->getAuthPassword());
+    expect(User::sole()->getRememberToken())->toBeEmpty();
 });
 
 test('the customer language is stored from Accept-Language', function (?string $header, string $locale) {

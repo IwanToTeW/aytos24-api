@@ -336,19 +336,11 @@ paths:
       x-implemented-in: BE-006
       summary: Register a customer with email and password
       description: |
-        Creates a customer, sends the email verification link and starts an
-        authenticated browser session (the session ID is regenerated). The
-        new customer is unverified (`email_verified: false`) but may use every
-        authenticated endpoint in this document; actions that need a
-        verified email (for example placing an order) enforce it separately
-        with `403`.
-
-        If the request already carries an authenticated session, that
-        customer is signed out first.
-
-        Requests that are not from the web app (no `Origin`/`Referer` in
-        `SANCTUM_STATEFUL_DOMAINS`, e.g. a future native client) get the
-        account and the verification email but no session and no token.
+        Creates an unverified customer and queues the email verification
+        link. **Nobody is signed in** (verification-first policy, amended in
+        FE-008): no session is started, no remember-me cookie and no token
+        are issued, and an existing session is left unchanged. The customer
+        signs in with `POST /v1/auth/login` after verifying the email.
 
         Duplicate emails are reported (`422` on `email`): registration is the
         one place where the existence of an account is revealed, mitigated by
@@ -376,25 +368,17 @@ paths:
                   password_confirmation: ExamplePassword123!
       responses:
         '201':
-          description: Customer created and signed in. The verification email has been queued.
-          headers:
-            Set-Cookie:
-              $ref: '#/components/headers/Set-Cookie'
+          description: Customer created, not signed in. The verification email has been queued.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/CustomerResource'
+                $ref: '#/components/schemas/RegistrationAccepted'
               examples:
                 registered:
-                  summary: Newly registered, unverified customer
+                  summary: Verify the email before signing in
                   value:
-                    data:
-                      id: 123
-                      name: Ivan
-                      email: ivan@example.com
-                      email_verified: false
-                      phone: null
-                      created_at: '2026-10-10T09:00:00Z'
+                    message: Your account has been created. Check your email and verify your address before signing in.
+                    verification_required: true
         '419':
           $ref: '#/components/responses/CsrfTokenMismatch'
         '422':
@@ -444,11 +428,17 @@ paths:
         account without a password all produce the **same** `422` response,
         so the endpoint does not reveal whether an account exists.
 
+        Verification-first policy (amended in FE-008): correct credentials
+        of a customer whose email is not verified get `403` with
+        `code: EMAIL_NOT_VERIFIED` and **no session**. This status is only
+        ever returned for the correct password, so it reveals nothing to
+        someone who does not know it.
+
         If the request already carries an authenticated session, that
         customer is signed out first.
 
         Requests that are not from the web app (no stateful `Origin`/`Referer`)
-        are only validated: the same `200`/`422`, but no session and no token,
+        are only validated: the same `200`/`403`/`422`, but no session and no token,
         because native token issuance is not implemented yet.
 
         Rate limit: 5 failed attempts per minute per email and IP address
@@ -496,6 +486,20 @@ paths:
                       email_verified: true
                       phone: null
                       created_at: '2026-10-10T09:00:00Z'
+        '403':
+          description: |
+            The credentials are correct but the email is not verified yet. No
+            session is started. Clients branch on `code`, not on the message.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmailNotVerified'
+              examples:
+                unverified:
+                  summary: Email not verified
+                  value:
+                    message: Verify your email address before signing in.
+                    code: EMAIL_NOT_VERIFIED
         '419':
           $ref: '#/components/responses/CsrfTokenMismatch'
         '422':
@@ -573,6 +577,10 @@ paths:
         Returns the signed-in customer. The web app calls it on start-up to
         restore the session; a `401` means "not signed in" and is not an
         error to report. Identical in shape to `GET /v1/me`.
+
+        Only verified customers are signed in. A session of a customer whose
+        email is not verified (e.g. started before the verification-first
+        policy) is ended and answered `401`, like any signed-out request.
       security:
         - browserSession: []
         - nativeToken: []
@@ -805,22 +813,55 @@ paths:
       x-implemented-in: BE-006
       summary: Resend the email verification link
       description: |
-        Queues a new verification email for the signed-in customer. When the
-        email is already verified nothing is sent and the response is the
-        same.
+        Guest endpoint (amended in FE-008: unverified customers cannot sign
+        in). If the email belongs to a customer whose email is not verified,
+        a new verification link is queued — at most one per account per
+        60 seconds, whoever asks. The response is **identical** for
+        unverified, verified and unknown emails, within the cooldown and when
+        the email could not be queued.
 
-        Rate limit: 6 requests per minute per customer.
-      security:
-        - browserSession: []
-        - nativeToken: []
+        Rate limit: 6 requests per minute per IP address, whatever the email.
+      security: []
       parameters:
         - $ref: '#/components/parameters/XsrfToken'
         - $ref: '#/components/parameters/AcceptLanguage'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResendVerificationRequest'
+            examples:
+              resend:
+                summary: Resend the link
+                value:
+                  email: ivan@example.com
       responses:
-        '202':
-          description: Accepted. No body.
-        '401':
-          $ref: '#/components/responses/Unauthenticated'
+        '200':
+          description: Request accepted. The same body for every valid email.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+              examples:
+                accepted:
+                  summary: Unverified, verified and unknown emails alike
+                  value:
+                    message: If an unverified account exists for this email address, a new verification link will be sent.
+        '422':
+          description: The email is missing or malformed. Never reports unknown accounts.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+              examples:
+                invalidEmail:
+                  summary: Malformed email
+                  value:
+                    message: The email field must be a valid email address.
+                    errors:
+                      email:
+                        - The email field must be a valid email address.
         '419':
           $ref: '#/components/responses/CsrfTokenMismatch'
         '429':
@@ -1720,6 +1761,39 @@ components:
           type: boolean
           default: false
           description: Keep the customer signed in on this browser after the idle session expires.
+
+    RegistrationAccepted:
+      type: object
+      description: The account exists; the customer must verify the email before signing in.
+      required: [message, verification_required]
+      additionalProperties: false
+      properties:
+        message:
+          type: string
+          description: For display only.
+        verification_required:
+          const: true
+
+    EmailNotVerified:
+      type: object
+      description: Correct credentials, but the email is not verified yet.
+      required: [message, code]
+      additionalProperties: false
+      properties:
+        message:
+          type: string
+          description: For display only.
+        code:
+          const: EMAIL_NOT_VERIFIED
+
+    ResendVerificationRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 255
 
     ForgotPasswordRequest:
       type: object

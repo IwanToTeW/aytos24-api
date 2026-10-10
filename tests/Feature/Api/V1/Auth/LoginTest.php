@@ -2,6 +2,7 @@
 
 use App\Models\User;
 use Illuminate\Auth\Events\Failed;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Tests\Support\OpenApiContract;
 
@@ -41,10 +42,65 @@ test('login regenerates the session identifier', function () {
     expect($browser->sessionId())->not->toBeNull()->not->toBe($before);
 });
 
-test('a customer with an unverified email can log in', function () {
+test('correct credentials of an unverified customer are refused with EMAIL_NOT_VERIFIED and no session', function () {
+    config(['app.debug' => false]);
+    customer(['email_verified_at' => null]);
+    $browser = browser();
+
+    $response = $browser->login('ivan@example.com')
+        ->assertForbidden()
+        ->assertExactJson(['message' => 'Verify your email address before signing in.', 'code' => 'EMAIL_NOT_VERIFIED']);
+
+    OpenApiContract::assertResponseMatches($response, '/v1/auth/login', 'post');
+    $browser->get('/api/v1/auth/user')->assertUnauthorized();
+    expect(DB::table('sessions')->whereNotNull('user_id')->count())->toBe(0);
+});
+
+test('a wrong password never reveals that the email is unverified', function () {
     customer(['email_verified_at' => null]);
 
-    browser()->login('ivan@example.com')->assertOk()->assertJsonPath('data.email_verified', false);
+    $unverified = $this->postJson('/api/v1/auth/login', ['email' => 'ivan@example.com', 'password' => 'WrongPassword123!'], frontendHeaders());
+    $unknown = $this->postJson('/api/v1/auth/login', ['email' => 'nobody@example.com', 'password' => 'WrongPassword123!'], frontendHeaders());
+
+    expect([$unverified->status(), $unverified->json()])->toBe([$unknown->status(), $unknown->json()])
+        ->and($unverified->status())->toBe(422);
+});
+
+test('an unverified customer is refused without a web app session too', function () {
+    customer(['email_verified_at' => null]);
+
+    $this->postJson('/api/v1/auth/login', ['email' => 'ivan@example.com', 'password' => 'ExamplePassword123!'])
+        ->assertForbidden()
+        ->assertJsonPath('code', 'EMAIL_NOT_VERIFIED');
+    $this->assertGuest('web');
+});
+
+test('the unverified message is translated, the code is not', function () {
+    customer(['email_verified_at' => null]);
+
+    $this->postJson('/api/v1/auth/login', ['email' => 'ivan@example.com', 'password' => 'ExamplePassword123!'], [...frontendHeaders(), 'Accept-Language' => 'bg'])
+        ->assertForbidden()
+        ->assertExactJson(['message' => 'Потвърдете имейл адреса си, преди да влезете.', 'code' => 'EMAIL_NOT_VERIFIED']);
+});
+
+test('an unverified customer signing in from a signed-in browser ends up signed out', function () {
+    customer();
+    User::factory()->unverified()->create(['email' => 'maria@example.com', 'password' => 'ExamplePassword123!']);
+    $browser = browser();
+    $browser->login('ivan@example.com')->assertOk();
+
+    $browser->login('maria@example.com')->assertForbidden();
+
+    $browser->get('/api/v1/auth/user')->assertUnauthorized();
+});
+
+test('a customer signs in once the email is verified', function () {
+    $customer = customer(['email_verified_at' => null]);
+    browser()->login('ivan@example.com')->assertForbidden();
+
+    $customer->markEmailAsVerified();
+
+    browser()->login('ivan@example.com')->assertOk()->assertJsonPath('data.email_verified', true);
 });
 
 test('the email is normalised like at registration', function () {

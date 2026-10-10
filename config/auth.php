@@ -133,12 +133,14 @@ return [
     | Email Verification
     |--------------------------------------------------------------------------
     |
-    | Minutes a signed email verification link stays valid (24 hours).
+    | Minutes a signed email verification link stays valid (24 hours), and
+    | seconds between verification emails resent to one account.
     |
     */
 
     'verification' => [
         'expire' => (int) env('AUTH_VERIFICATION_EXPIRE', 1440),
+        'resend_cooldown' => (int) env('AUTH_VERIFICATION_RESEND_COOLDOWN', 60),
     ],
 
     /*

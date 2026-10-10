@@ -34,8 +34,9 @@ class AppServiceProvider extends ServiceProvider
             ->by($request->ip()));
         RateLimiter::for('verify-email', fn (Request $request) => Limit::perMinute(config('auth.rate_limits.verify_email_per_minute'))
             ->by($request->ip()));
+        // Per IP; each account additionally gets at most one email per cooldown (controller).
         RateLimiter::for('verification-notification', fn (Request $request) => Limit::perMinute(config('auth.rate_limits.verification_notification_per_minute'))
-            ->by($request->user()?->getAuthIdentifier() ?? $request->ip()));
+            ->by($request->ip()));
         // Per IP only, never per email, so a 429 says nothing about whether an account exists.
         RateLimiter::for('forgot-password', fn (Request $request) => Limit::perHour(config('auth.rate_limits.forgot_password_per_hour'))
             ->by($request->ip()));

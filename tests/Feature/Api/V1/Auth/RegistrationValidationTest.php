@@ -110,7 +110,10 @@ test('protected attributes cannot be mass assigned', function () {
         ->and($customer->phone)->toBeNull()
         ->and($customer->locale)->toBe('en')
         ->and($customer->created_at->toDateString())->not->toBe('2020-01-01')
-        ->and($response->json('data.email_verified'))->toBeFalse();
+        ->and($response->json())->toBe([
+            'message' => 'Your account has been created. Check your email and verify your address before signing in.',
+            'verification_required' => true,
+        ]);
 });
 
 test('validation messages are Bulgarian with Accept-Language: bg, with the same structure', function () {

@@ -4,12 +4,10 @@ namespace App\Http\Controllers\Api\V1\Auth;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Api\V1\Auth\RegisterCustomerRequest;
-use App\Http\Resources\V1\CustomerResource;
 use App\Models\User;
 use Illuminate\Auth\Events\Registered;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Support\Facades\Auth;
 use Illuminate\Validation\ValidationException;
 use Throwable;
 
@@ -18,9 +16,8 @@ class RegisterController extends Controller
     /**
      * Register a customer.
      *
-     * Creates an unverified customer, queues the verification email and, for browser (stateful)
-     * requests, signs the customer in with a regenerated session. Requests without a session
-     * (future native clients) get the account but no session or token. See
+     * Creates an unverified customer and queues the verification email. Nobody is signed in: the
+     * customer signs in after verifying the email (verification-first policy). See
      * docs/api/authentication.md.
      */
     public function __invoke(RegisterCustomerRequest $request): JsonResponse
@@ -39,17 +36,9 @@ class RegisterController extends Controller
             report($e);
         }
 
-        if ($request->hasSession()) {
-            $guard = Auth::guard('web');
-
-            if ($guard->check()) {
-                $guard->logout();
-            }
-
-            $guard->login($customer, $request->remember());
-            $request->session()->regenerate();
-        }
-
-        return (new CustomerResource($customer->refresh()))->response()->setStatusCode(201);
+        return response()->json([
+            'message' => __('auth.registered'),
+            'verification_required' => true,
+        ], 201);
     }
 }

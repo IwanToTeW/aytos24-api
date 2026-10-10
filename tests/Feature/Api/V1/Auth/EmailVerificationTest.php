@@ -7,6 +7,7 @@ use Illuminate\Auth\Events\Verified;
 use Illuminate\Support\Facades\App;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Notification;
+use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\URL;
 use Tests\Support\OpenApiContract;
 
@@ -51,13 +52,20 @@ test('the link from the registration email verifies the customer', function () {
     OpenApiContract::assertResponseMatches($response, VERIFY_PATH);
 });
 
-test('the verified status is visible in the customer resource', function () {
+test('register, verify, then sign in: the verification-first journey', function () {
     Notification::fake();
-    registerCustomer()->assertJsonPath('data.email_verified', false);
+    registerCustomer()->assertCreated();
     $customer = User::sole();
 
-    $this->get(verificationLinkFor($customer))->assertRedirect(resultPage('verified'));
+    browser()->login('ivan@example.com')->assertForbidden()->assertJsonPath('code', 'EMAIL_NOT_VERIFIED');
 
+    // Opened by a guest, e.g. in the mail app's browser: verifies, but signs nobody in.
+    $this->get(verificationLinkFor($customer))->assertRedirect(resultPage('verified'));
+    $this->assertGuest('web');
+
+    $browser = browser();
+    $browser->login('ivan@example.com')->assertOk()->assertJsonPath('data.email_verified', true);
+    $browser->get('/api/v1/auth/user')->assertOk();
     expect((new CustomerResource($customer->fresh()))->resolve()['email_verified'])->toBeTrue();
 });
 
@@ -196,12 +204,29 @@ test('routes requiring a verified email reject unverified customers with 403', f
     $this->actingAs(User::factory()->create())->getJson('/api/test/verified-only')->assertOk();
 });
 
-test('unverified customers can still use authenticated endpoints', function () {
-    Notification::fake();
+test('unverified customers cannot use customer endpoints', function () {
+    config(['app.debug' => false]);
 
     $this->actingAs(User::factory()->unverified()->create())
-        ->postJson('/api/v1/auth/email/verification-notification')
-        ->assertStatus(202);
+        ->getJson('/api/v1/auth/user')
+        ->assertUnauthorized()
+        ->assertExactJson(['message' => 'Unauthenticated.']);
+});
+
+test('resetting the password neither verifies the email nor signs the customer in', function () {
+    $customer = customer(['email_verified_at' => null]);
+    $token = Password::broker()->createToken($customer);
+
+    $this->postJson('/api/v1/auth/reset-password', [
+        'email' => 'ivan@example.com',
+        'token' => $token,
+        'password' => 'NewExamplePassword123!',
+        'password_confirmation' => 'NewExamplePassword123!',
+    ], frontendHeaders())->assertOk();
+
+    expect($customer->fresh()->hasVerifiedEmail())->toBeFalse();
+    $this->assertGuest('web');
+    browser()->login('ivan@example.com', 'NewExamplePassword123!')->assertForbidden()->assertJsonPath('code', 'EMAIL_NOT_VERIFIED');
 });
 
 test('the email is in Bulgarian by default and identifies Aytos24, its purpose and the expiry', function () {

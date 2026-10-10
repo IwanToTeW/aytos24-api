@@ -19,9 +19,10 @@ services:
       APP_DEBUG: "false"
       APP_URL: http://localhost:8001
       DB_DATABASE: e2e
-      # Array stores reset on every request: no rate limiting, no shared session/cache state.
+      # Array cache resets on every request: no rate limiting. Sessions must persist across requests for
+      # Sanctum SPA authentication (CSRF + login), so they use the e2e database's sessions table.
       CACHE_STORE: array
-      SESSION_DRIVER: array
+      SESSION_DRIVER: database
       QUEUE_CONNECTION: sync
       CORS_ALLOWED_ORIGINS: ${E2E_CORS_ALLOWED_ORIGINS:-http://localhost:5175}
       FRONTEND_URL: ${E2E_FRONTEND_URL:-http://localhost:5175}

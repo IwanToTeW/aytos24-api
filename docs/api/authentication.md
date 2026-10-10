@@ -27,10 +27,35 @@ operation carries `x-implementation-status` (`implemented` or `contract-only`) a
 | Profile retrieval and update | Contract only | BE-010 |
 | Linking and unlinking social accounts | Contract only (rules below) | BE-011 |
 | Native (Capacitor) token authentication | Strategy only, no endpoints | — |
+| Verification-first registration and login (amends BE-006/BE-007) | **Implemented** | FE-008 dependency |
 
 Platform: Laravel **13.35.0**, PHP 8.4 in Docker, **Laravel Sanctum 4.3** (added in BE-006).
 Laravel Socialite is not installed yet; BE-008 adds `laravel/socialite` and, because Socialite has no
 built-in Apple driver, `socialiteproviders/apple`.
+
+### Verification-first policy (amends BE-006 and BE-007)
+
+Requested by FE-008, superseding the BE-006/BE-007 rules that signed customers in at registration and let
+unverified customers sign in. **A customer is only ever signed in with a verified email.**
+
+| Rule | Where |
+| --- | --- |
+| Registration creates an unverified customer, queues the verification email and signs **nobody** in: `201 {"message", "verification_required": true}`, no session, no remember-me cookie, no token | `RegisterController` |
+| The verification link works for guests (unchanged) and never signs anyone in; the web app then sends the customer to sign in | `VerifyEmailController` |
+| Resend is a **guest** endpoint taking an `email`: same `200` message for every email, one email per account per 60 s, 6 requests per minute per IP | `EmailVerificationNotificationController`, `ResendVerificationRequest` |
+| Login checks the credentials first; wrong credentials keep the generic `422`. Correct credentials of an unverified customer get `403 {"message", "code": "EMAIL_NOT_VERIFIED"}` and no session (Laravel's `attemptWhen()`, so nothing is ever logged in) | `LoginController` |
+| Customer endpoints run `EnsureCustomerIsVerified` after `auth:sanctum`: a session of an unverified customer (e.g. started before this change) is logged out, invalidated and answered `401` like any signed-out request. Logout stays reachable | `app/Http/Middleware/EnsureCustomerIsVerified.php`, `routes/api.php` |
+| A password reset neither verifies the email nor signs in | `ResetPasswordController` (BE-009) |
+| Public discovery, registration, verification, resend, login and password recovery need no session | `routes/api.php` |
+
+Why `401` and not `403` for an unverified session: under this policy an unverified customer is not
+signed in at all, and the web app already treats `401` as "signed out" (a `403` keeps the session).
+Laravel's `verified` middleware (`403`) remains available for routes that need it later.
+
+`EMAIL_NOT_VERIFIED` is returned only after the password matched, so it reveals the account's status
+only to someone who already knows the password. Future social sign-in (BE-008) follows the same rule: a
+new customer is verified only when the provider asserts a verified email (Google, Apple); Facebook sign-ups
+must verify by email before they can sign in (section 11).
 
 ### What BE-006 implemented
 
@@ -66,23 +91,17 @@ authenticated groups (`/api/v1/me`, checkout) must add the same middleware.
 - Laravel's `Registered` event is dispatched; its listener queues the verification email. If
   dispatching fails, the error is reported to the log and registration still answers `201` — the
   customer can resend the email.
-- For web app requests the customer is signed in on the `web` guard (with a remember-me cookie when
-  `remember` is `true`) and the session ID is regenerated. No token is ever returned.
-- **Native limitation:** requests without a web app `Origin`/`Referer` get the account and the email but
-  no session and no token, because native token issuance is not implemented yet (section 3).
+- *Superseded by the verification-first policy:* nobody is signed in at registration (no session, no
+  remember-me cookie, no token); `remember` is ignored.
 
 **Email verification in detail.** The link is checked in this order: signature (else `invalid`),
 expiry (else `expired`), customer ID and email hash (else `invalid`), already verified
 (`already-verified`); only then is `email_verified_at` set and Laravel's `Verified` event dispatched
 (`verified`). The redirect target is always `FRONTEND_URL` + `/email-verified?status=…`; nothing in the
-request can change it. Unverified customers can use every authenticated endpoint; routes that need a
-verified email use Laravel's `verified` middleware, which answers `403`
-`{"message": "Your email address is not verified."}`.
+request can change it. *Superseded:* unverified customers can no longer sign in or use customer
+endpoints (see the verification-first policy above).
 
-**Resend.** The contract's `202 Accepted` with no body is kept, also for already verified customers
-(nothing is sent then). The BE-006 ticket text suggested `200` with
-`{"message": "Verification email sent."}`; the approved contract was followed instead so that clients
-never depend on message text.
+**Resend.** *Superseded:* now a guest endpoint with an `email` body and a generic `200` message.
 
 ### Mail and queue configuration
 
@@ -124,7 +143,8 @@ QUEUE_CONNECTION=database
 | --- | --- | --- |
 | `register` (per IP) | 10 per hour | `AUTH_REGISTER_LIMIT_PER_HOUR` |
 | `verify-email` (per IP) | 6 per minute | `AUTH_VERIFY_EMAIL_LIMIT_PER_MINUTE` |
-| `verification-notification` (per customer) | 6 per minute | `AUTH_VERIFICATION_NOTIFICATION_LIMIT_PER_MINUTE` |
+| `verification-notification` (per IP) | 6 per minute | `AUTH_VERIFICATION_NOTIFICATION_LIMIT_PER_MINUTE` |
+| Verification emails per account | 1 per 60 seconds | `AUTH_VERIFICATION_RESEND_COOLDOWN` |
 | `csrf-cookie` (per IP) | 60 per minute | `AUTH_CSRF_COOKIE_LIMIT_PER_MINUTE` |
 | `login` (per IP, all requests) | 20 per minute | `AUTH_LOGIN_LIMIT_PER_MINUTE` |
 | Failed logins (per email + IP) | 5 per minute | `AUTH_LOGIN_FAILURES_PER_MINUTE` |
@@ -147,7 +167,7 @@ typed and the password policy is not applied. Credentials are checked with Larav
 `SessionGuard::attempt()`, which hashes and compares through the configured hasher, fires the
 `Attempting`/`Failed` events, rehashes outdated hashes, and takes the same minimum time whether or not
 the account exists. On success the session ID and CSRF token are regenerated and `200` returns the
-customer resource. Unverified customers can sign in; `email_verified` tells the client.
+customer resource. *Superseded:* unverified customers get `403 EMAIL_NOT_VERIFIED` and no session.
 
 **Brute-force protection.** Two layers, both answering `429` with `Retry-After` and
 `{"message": "Too Many Attempts."}`:
@@ -364,7 +384,7 @@ All paths are relative to the API host. Base URL locally: `http://localhost:8000
 | `POST` | `/api/v1/auth/forgot-password` | Guest | Implemented | BE-009 | Request a password reset email |
 | `POST` | `/api/v1/auth/reset-password` | Guest | Implemented | BE-009 | Reset the password with a token |
 | `GET` | `/api/v1/auth/verify-email/{id}/{hash}` | Signed link | Implemented | BE-006 | Verify an email address (redirects) |
-| `POST` | `/api/v1/auth/email/verification-notification` | Required | Implemented | BE-006 | Resend the verification email |
+| `POST` | `/api/v1/auth/email/verification-notification` | Guest | Implemented | BE-006 | Resend the verification email |
 | `GET` | `/api/v1/auth/social/{provider}/redirect` | Guest | Contract only | BE-008 | Start Google, Facebook or Apple sign-in |
 | `GET` | `/api/v1/auth/social/{provider}/callback` | Guest | Contract only | BE-008 | OAuth callback for Google and Facebook |
 | `POST` | `/api/v1/auth/social/{provider}/callback` | Guest | Contract only | BE-008 | OAuth callback for Apple (`form_post`) |
@@ -374,8 +394,8 @@ All paths are relative to the API host. Base URL locally: `http://localhost:8000
 *Guest* means no authentication is required. *Required* means a valid session cookie (browser) or
 bearer token (native); otherwise `401`. *Signed link* means the URL's signature is the credential.
 
-Calling `register` or `login` while already signed in signs the current customer out first and starts
-a new session; there is no "already authenticated" error.
+Calling `login` while already signed in signs the current customer out first; there is no "already
+authenticated" error. `register` signs nobody in and leaves an existing session unchanged.
 
 ### Rate limits
 
@@ -391,7 +411,7 @@ signed-in requests, so customers behind a shared mobile-carrier IP are not throt
 | `forgot-password` | 20 per hour per IP (never per email, see section 13) |
 | `reset-password` | 5 per minute per IP |
 | `verify-email` | 6 per minute per IP |
-| `email/verification-notification` | 6 per minute per customer |
+| `email/verification-notification` | 6 per minute per IP; 1 email per account per 60 seconds |
 | `social/{provider}/redirect`, `…/callback` | 20 per minute per IP |
 
 Every limit answers `429` with a `Retry-After` header and the same body as the rest of the API.
@@ -426,18 +446,12 @@ Request:
 }
 ```
 
-`201 Created` (session cookie set, verification email queued):
+`201 Created` (verification email queued, **nobody signed in**):
 
 ```json
 {
-  "data": {
-    "id": 123,
-    "name": "Ivan",
-    "email": "ivan@example.com",
-    "email_verified": false,
-    "phone": null,
-    "created_at": "2026-10-10T09:00:00Z"
-  }
+  "message": "Your account has been created. Check your email and verify your address before signing in.",
+  "verification_required": true
 }
 ```
 
@@ -585,7 +599,14 @@ Location: https://aytos24.example/email-verified?status=verified
 
 #### `POST /api/v1/auth/email/verification-notification`
 
-No request body. `202 Accepted`, no body (also when already verified). Without a session: `401`.
+Guest. Request `{"email": "ivan@example.com"}`. `200 OK`, the same body for unverified, verified and
+unknown emails (`422` only for a missing or malformed email):
+
+```json
+{
+  "message": "If an unverified account exists for this email address, a new verification link will be sent."
+}
+```
 
 #### `GET /api/v1/auth/social/{provider}/redirect`
 
@@ -727,14 +748,14 @@ single leading `0` with `+359`; the result must match `^\+[1-9][0-9]{7,14}$` (E.
 | Endpoint | Status | Body |
 | --- | --- | --- |
 | `GET /sanctum/csrf-cookie` | `204` | none |
-| `POST /auth/register` | `201` | customer resource |
+| `POST /auth/register` | `201` | `{"message": …, "verification_required": true}` |
 | `POST /auth/login` | `200` | customer resource |
 | `POST /auth/logout` | `204` | none |
 | `GET /auth/user` | `200` | customer resource |
 | `POST /auth/forgot-password` | `200` | `{"message": …}`, identical for every valid email |
 | `POST /auth/reset-password` | `200` | `{"message": …}` |
 | `GET /auth/verify-email/{id}/{hash}` | `302` | redirect to the frontend |
-| `POST /auth/email/verification-notification` | `202` | none |
+| `POST /auth/email/verification-notification` | `200` | `{"message": …}`, identical for every valid email |
 | `GET /auth/social/{provider}/redirect` | `302` | redirect to the provider |
 | `GET`/`POST /auth/social/{provider}/callback` | `303` | redirect to the frontend |
 | `GET /me` | `200` | customer resource |
@@ -777,7 +798,9 @@ Validation errors use Laravel's standard format with status `422`:
 | Unauthenticated request (never signed in, signed out, token revoked) | `401` | `{"message": "Unauthenticated."}` |
 | Expired session | `401` (or `419` on `POST`/`PATCH`, see section 14) | as above |
 | Missing or stale CSRF token (browser) | `419` | `{"message": "CSRF token mismatch."}` |
-| Unauthorised action (e.g. ordering with an unverified email, future) | `403` | `{"message": "…"}` |
+| Correct credentials, email not verified (login) | `403` | `{"message": "…", "code": "EMAIL_NOT_VERIFIED"}` |
+| Session of an unverified customer on a customer endpoint | `401` | `{"message": "Unauthenticated."}`; the session is ended |
+| Unauthorised action (future) | `403` | `{"message": "…"}` |
 | Invalid password reset token | `422` | validation error on `token` |
 | Expired password reset token | `422` | same as invalid |
 | OAuth failure (cancelled, bad state, provider error, …) | `303` | redirect with `status=error&error=<code>` |
@@ -910,7 +933,11 @@ once during the callback and **never stored or returned**: Aytos24 needs the ide
 4. **New customer.** Create the customer with the provider's name (or `null`), the lowercased email
    and `password` `null`, then create the link. `email_verified_at` is set when the provider asserts a
    verified email (Google, Apple); otherwise (Facebook) the verification email is sent as for
-   registration. `new_account=1`.
+   registration and, under the verification-first policy, the customer is **not** signed in: the
+   callback redirects with `status=error&error=email_unverified` (code to be added to the contract in
+   BE-008). `new_account=1` only for signed-in new customers.
+5. **Existing unverified customer.** A known identity (rule 1) whose customer's email is not verified is
+   not signed in either (same error), so social sign-in never bypasses verification.
 
 ### Linking and unlinking (BE-011)
 
@@ -948,12 +975,15 @@ once during the callback and **never stored or returned**: Aytos24 needs the ide
   **never** signs anyone in. It always redirects (`302`) to
   `{FRONTEND_URL}/email-verified?status=verified|already-verified|expired|invalid`; it never returns
   JSON for the outcome.
-- Unverified customers can sign in, use `/auth/user`, `/me` and resend the email. Actions that need
-  a verified email (placing orders) answer `403` with
-  `{"message": "Your email address is not verified."}` until then.
-- Customers created through Google or Apple with a verified email are verified immediately.
-- `POST /api/v1/auth/email/verification-notification` re-sends the email (`202`); if already verified,
-  nothing is sent and the response is the same.
+- **Verification first:** unverified customers cannot sign in (`403 EMAIL_NOT_VERIFIED` after a correct
+  password) and an unverified session is ended on customer endpoints (`401`). After verifying, the
+  customer signs in normally.
+- Customers created through Google or Apple with a verified email are verified immediately; Facebook
+  sign-ups must verify by email first.
+- `POST /api/v1/auth/email/verification-notification` (guest, `{"email"}`) re-sends the email to an
+  unverified account; the `200` message is the same for every email, and each account gets at most one
+  email per 60 seconds.
+- A password reset does not verify the email.
 
 ## 13. Password recovery behaviour
 
@@ -1150,7 +1180,10 @@ For FE-005 (API client and Pinia auth store):
 3. **Bootstrapping.** On app start call `GET /api/v1/auth/user`: `200` → signed in, `401` → guest.
    Store the customer in Pinia memory only; never persist credentials or the customer to
    `localStorage`.
-4. **Register / login.** Post the payloads from section 5 and put `data` in the store. Show
+4. **Register / login.** Registration (`201`) signs nobody in: show a "check your email" state, never
+   put a customer in the store. Login: put `data` in the store on `200`; on `403` with
+   `code: EMAIL_NOT_VERIFIED` show "verify your email before signing in" with a resend action
+   (`POST /email/verification-notification` with the email); keep the generic message for `422`. Show
    `errors.<field>[0]` next to fields on `422`.
 5. **Logout.** `POST /api/v1/auth/logout`, then clear the store (also on `401`).
 
@@ -1187,14 +1220,15 @@ For FE-005 (API client and Pinia auth store):
    })
    ```
 6. **Route guards.** Browsing needs no account. Before checkout, require a signed-in customer and
-   redirect guests to sign-in with the intended path; require `email_verified` before placing an order.
+   redirect guests to sign-in with the intended path. Signed-in customers are always verified (the
+   backend guarantees it), so the guard needs no separate `email_verified` check.
 7. **Social buttons.** `window.location.assign(API + '/api/v1/auth/social/' + provider +
    '/redirect?intended=' + encodeURIComponent(path) + '&remember=1')`. Never call it with XHR.
 8. **`/auth/social/callback` page.** Read `status`, `provider`, `intended`, `new_account`, `error`
    (section 10). On success refetch `/auth/user` and navigate to `intended` (prompting for `name` or
    `phone` first if missing). On error show the message for `error`.
-9. **`/email-verified` page.** Read `status` (`verified`, `already-verified`, `expired`, `invalid`);
-   if signed in, refetch `/auth/user`.
+9. **`/email-verified` page.** Read `status` (`verified`, `already-verified`, `expired`, `invalid`).
+   On `verified`/`already-verified` offer sign-in; on `expired`/`invalid` offer to resend the link.
 10. **`/reset-password` page.** Read `token` and `email` from the **query string**, remove them from
     the address bar, post to `/api/v1/auth/reset-password`, then send the customer to sign-in. See the
     FE-008 rules in section 13.
