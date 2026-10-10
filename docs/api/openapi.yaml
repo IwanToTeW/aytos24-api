@@ -431,7 +431,7 @@ paths:
     post:
       tags: [Authentication]
       operationId: loginCustomer
-      x-implementation-status: contract-only
+      x-implementation-status: implemented
       x-implemented-in: BE-007
       summary: Sign in with email and password
       description: |
@@ -446,6 +446,10 @@ paths:
 
         If the request already carries an authenticated session, that
         customer is signed out first.
+
+        Requests that are not from the web app (no stateful `Origin`/`Referer`)
+        are only validated: the same `200`/`422`, but no session and no token,
+        because native token issuance is not implemented yet.
 
         Rate limit: 5 failed attempts per minute per email and IP address
         combination, and 20 requests per minute per IP address.
@@ -526,14 +530,15 @@ paths:
     post:
       tags: [Authentication]
       operationId: logoutCustomer
-      x-implementation-status: contract-only
+      x-implementation-status: implemented
       x-implemented-in: BE-007
       summary: Sign out of the current session or device
       description: |
         Browser session: signs out, invalidates the session, regenerates the
-        CSRF token and expires the remember-me cookie. Native token: revokes
-        only the token used for this request. Other browsers and devices of
-        the same customer stay signed in.
+        CSRF token and expires the remember-me cookie. Other browsers and
+        devices of the same customer stay signed in (the remember-me token is
+        not cycled). Native tokens (future) will revoke only the token used
+        for the request; no tokens are issued yet.
 
         Clients should treat a `401` from this endpoint as "already signed
         out".
@@ -561,7 +566,7 @@ paths:
     get:
       tags: [Authentication]
       operationId: getAuthenticatedCustomer
-      x-implementation-status: contract-only
+      x-implementation-status: implemented
       x-implemented-in: BE-007
       summary: Get the authenticated customer
       description: |

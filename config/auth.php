@@ -140,6 +140,8 @@ return [
 
     'rate_limits' => [
         'register_per_hour' => (int) env('AUTH_REGISTER_LIMIT_PER_HOUR', 10),
+        'login_per_minute' => (int) env('AUTH_LOGIN_LIMIT_PER_MINUTE', 20),
+        'login_failures_per_minute' => (int) env('AUTH_LOGIN_FAILURES_PER_MINUTE', 5),
         'verify_email_per_minute' => (int) env('AUTH_VERIFY_EMAIL_LIMIT_PER_MINUTE', 6),
         'verification_notification_per_minute' => (int) env('AUTH_VERIFICATION_NOTIFICATION_LIMIT_PER_MINUTE', 6),
         'csrf_cookie_per_minute' => (int) env('AUTH_CSRF_COOKIE_LIMIT_PER_MINUTE', 60),

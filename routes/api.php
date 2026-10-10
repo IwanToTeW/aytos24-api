@@ -1,6 +1,9 @@
 <?php
 
+use App\Http\Controllers\Api\V1\Auth\CurrentCustomerController;
 use App\Http\Controllers\Api\V1\Auth\EmailVerificationNotificationController;
+use App\Http\Controllers\Api\V1\Auth\LoginController;
+use App\Http\Controllers\Api\V1\Auth\LogoutController;
 use App\Http\Controllers\Api\V1\Auth\RegisterController;
 use App\Http\Controllers\Api\V1\Auth\VerifyEmailController;
 use App\Http\Controllers\Api\V1\HelloController;
@@ -24,6 +27,18 @@ Route::prefix('v1')->group(function () {
             Route::post('register', RegisterController::class)
                 ->middleware('throttle:register')
                 ->name('register');
+
+            Route::post('login', LoginController::class)
+                ->middleware('throttle:login')
+                ->name('login');
+
+            Route::post('logout', LogoutController::class)
+                ->middleware('auth:sanctum')
+                ->name('logout');
+
+            Route::get('user', CurrentCustomerController::class)
+                ->middleware('auth:sanctum')
+                ->name('user');
 
             Route::get('verify-email/{id}/{hash}', VerifyEmailController::class)
                 ->middleware('throttle:verify-email')

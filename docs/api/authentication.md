@@ -21,7 +21,7 @@ operation carries `x-implementation-status` (`implemented` or `contract-only`) a
 | --- | --- | --- |
 | CSRF initialisation (`GET /sanctum/csrf-cookie`) | **Implemented** | BE-006 |
 | Registration and email verification | **Implemented** | BE-006 |
-| Login, logout, current user | Contract only | BE-007 |
+| Login, logout, current user, session management | **Implemented** | BE-007 |
 | Google, Facebook and Apple sign-in | Contract only | BE-008 |
 | Password reset and recovery | Contract only | BE-009 |
 | Profile retrieval and update | Contract only | BE-010 |
@@ -123,6 +123,51 @@ QUEUE_CONNECTION=database
 | `verify-email` (per IP) | 6 per minute | `AUTH_VERIFY_EMAIL_LIMIT_PER_MINUTE` |
 | `verification-notification` (per customer) | 6 per minute | `AUTH_VERIFICATION_NOTIFICATION_LIMIT_PER_MINUTE` |
 | `csrf-cookie` (per IP) | 60 per minute | `AUTH_CSRF_COOKIE_LIMIT_PER_MINUTE` |
+| `login` (per IP, all requests) | 20 per minute | `AUTH_LOGIN_LIMIT_PER_MINUTE` |
+| Failed logins (per email + IP) | 5 per minute | `AUTH_LOGIN_FAILURES_PER_MINUTE` |
+
+### What BE-007 implemented
+
+| Piece | Where |
+| --- | --- |
+| `POST /api/v1/auth/login` | `LoginController`, `LoginRequest` |
+| `POST /api/v1/auth/logout` | `LogoutController` |
+| `GET /api/v1/auth/user` | `CurrentCustomerController` (reuses `CustomerResource`) |
+| Bulgarian `auth` messages | `lang/bg/auth.php` |
+| Secure session cookies by default in production | `config/session.php` (`SESSION_SECURE_COOKIE` defaults to `true` when `APP_ENV=production`) |
+| Browser-realistic test client (cookie jar, database sessions, CSRF enforced) | `tests/Support/Browser.php` |
+
+**Login.** The email is trimmed and lowercased exactly as at registration; the password is used as
+typed and the password policy is not applied. Credentials are checked with Laravel's
+`SessionGuard::attempt()`, which hashes and compares through the configured hasher, fires the
+`Attempting`/`Failed` events, rehashes outdated hashes, and takes the same minimum time whether or not
+the account exists. On success the session ID and CSRF token are regenerated and `200` returns the
+customer resource. Unverified customers can sign in; `email_verified` tells the client.
+
+**Brute-force protection.** Two layers, both answering `429` with `Retry-After` and
+`{"message": "Too Many Attempts."}`:
+
+1. `throttle:login`: 20 login requests per minute per IP, whatever the outcome.
+2. Failed attempts per **email + IP** (the email lowercased): after 5 failures within a minute, that
+   email is locked on that IP for the rest of the minute — even the correct password then gets `429`.
+   Laravel's `Lockout` event is fired. A successful login clears the counter. Unknown emails are counted
+   and locked exactly like existing ones, so lock-outs reveal nothing; other customers, and the same
+   customer on another IP, are unaffected.
+
+**Logout.** `Auth::guard('web')->logoutCurrentDevice()`, then the session is invalidated (its row
+deleted) and a new CSRF token issued; `204` with no body. The remember-me token is not cycled, so the
+customer's other browsers stay signed in (signing out everywhere is a later feature). The customer
+record is not modified.
+
+**Current user.** `auth:sanctum` resolves the customer from the session (Sanctum checks the `web` guard
+first); the controller only wraps it in `CustomerResource`. It reads the session, loads the customer
+and writes the session: three queries.
+
+**Native clients.** Login requests without a web app `Origin`/`Referer` are validated (and rate
+limited) but get no session and no token. No personal access tokens are issued anywhere yet.
+
+**Status codes kept from the contract.** The BE-007 ticket text mentions `200` for logout; the
+approved contract's `204 No Content` is kept, as for the other bodiless responses.
 
 ## Contents
 
@@ -200,7 +245,8 @@ not supported by this contract.
 
 ### Required configuration
 
-Applied in BE-006 (`.env.example`, `config/cors.php`, `config/sanctum.php`). Production values:
+Applied in BE-006 and BE-007 (`.env.example`, `config/cors.php`, `config/sanctum.php`,
+`config/session.php`). Production values:
 
 ```dotenv
 FRONTEND_URL=https://aytos24.example
@@ -213,9 +259,31 @@ SESSION_HTTP_ONLY=true
 SESSION_LIFETIME=120
 ```
 
-Locally: `FRONTEND_URL=http://localhost:5173`, `SANCTUM_STATEFUL_DOMAINS=localhost:5173`,
-`SESSION_DOMAIN=null`, `SESSION_SECURE_COOKIE=false`. `SANCTUM_STATEFUL_DOMAINS` lists hosts with port
-and without scheme; `CORS_ALLOWED_ORIGINS` lists full origins.
+**Local Docker** (`.env.example`): API on `http://localhost:8000`, Vite dev server on
+`http://localhost:5173`:
+
+```dotenv
+APP_URL=http://localhost:8000
+FRONTEND_URL=http://localhost:5173
+CORS_ALLOWED_ORIGINS=http://localhost:5173
+SANCTUM_STATEFUL_DOMAINS=localhost:5173
+SESSION_DRIVER=database
+SESSION_COOKIE=aytos24_session
+SESSION_DOMAIN=null
+SESSION_SECURE_COOKIE=false
+```
+
+`localhost:5173` and `localhost:8000` are the same *site* (ports are ignored), so `SameSite=Lax`
+cookies flow without HTTPS. Use `localhost` on both sides, not `127.0.0.1` on one of them. The frontend
+e2e stack (`compose.e2e.yaml`) uses port 5175 and stores sessions in memory per request, so sign-ins do
+not persist there.
+
+`SANCTUM_STATEFUL_DOMAINS` lists hosts with port and without scheme; `CORS_ALLOWED_ORIGINS` lists full
+origins. Both must contain the web app.
+
+**Production cookies:** `Secure` (HTTPS only; the default when `APP_ENV=production`), `HttpOnly`,
+`SameSite=Lax` (Sanctum enforces it for stateful requests), `Domain=.aytos24.example` so the web app and
+API subdomains share them. Session IDs never appear in URLs or JSON.
 
 - `routes/api.php`: Sanctum's `EnsureFrontendRequestsAreStateful` on the authentication route groups
   (not `statefulApi()` on the whole API), so their requests from stateful origins get sessions and CSRF
@@ -263,9 +331,9 @@ All paths are relative to the API host. Base URL locally: `http://localhost:8000
 | --- | --- | --- | --- | --- | --- |
 | `GET` | `/sanctum/csrf-cookie` | Guest | Implemented | BE-006 | Initialise CSRF protection (browser only) |
 | `POST` | `/api/v1/auth/register` | Guest | Implemented | BE-006 | Register a customer |
-| `POST` | `/api/v1/auth/login` | Guest | Contract only | BE-007 | Sign in with email and password |
-| `POST` | `/api/v1/auth/logout` | Required | Contract only | BE-007 | End the current session or revoke the current token |
-| `GET` | `/api/v1/auth/user` | Required | Contract only | BE-007 | Get the authenticated customer |
+| `POST` | `/api/v1/auth/login` | Guest | Implemented | BE-007 | Sign in with email and password |
+| `POST` | `/api/v1/auth/logout` | Required | Implemented | BE-007 | End the current session or revoke the current token |
+| `GET` | `/api/v1/auth/user` | Required | Implemented | BE-007 | Get the authenticated customer |
 | `POST` | `/api/v1/auth/forgot-password` | Guest | Contract only | BE-009 | Request a password reset email |
 | `POST` | `/api/v1/auth/reset-password` | Guest | Contract only | BE-009 | Reset the password with a token |
 | `GET` | `/api/v1/auth/verify-email/{id}/{hash}` | Signed link | Implemented | BE-006 | Verify an email address (redirects) |
@@ -942,6 +1010,39 @@ For FE-005 (API client and Pinia auth store):
 4. **Register / login.** Post the payloads from section 5 and put `data` in the store. Show
    `errors.<field>[0]` next to fields on `422`.
 5. **Logout.** `POST /api/v1/auth/logout`, then clear the store (also on `401`).
+
+   The three flows, end to end:
+
+   | Step | Login | Restore session (app start / refresh) | Logout |
+   | --- | --- | --- | --- |
+   | 1 | `GET /sanctum/csrf-cookie` → `204`, `XSRF-TOKEN` + session cookies | `GET /api/v1/auth/user` with cookies | `POST /api/v1/auth/logout` with `X-XSRF-TOKEN` |
+   | 2 | `POST /api/v1/auth/login` with `X-XSRF-TOKEN` | Backend loads the session (or the remember-me cookie) | Backend signs out and invalidates the session |
+   | 3 | Backend checks the credentials (rate limited) | `200 {data: customer}` or `401` | Backend issues a new CSRF token (`XSRF-TOKEN` cookie) |
+   | 4 | Backend starts a new session (ID and CSRF token regenerated) | Store the customer, or mark as guest | `204` |
+   | 5 | `200 {data: customer}` (`422` invalid, `429` locked) | — | Clear the store |
+   | 6 | Store the customer | — | — |
+
+   Axios setup:
+
+   ```js
+   const api = axios.create({
+     baseURL: import.meta.env.VITE_API_URL, // http://localhost:8000
+     withCredentials: true,                 // send and receive cookies
+     withXSRFToken: true,                   // send XSRF-TOKEN as X-XSRF-TOKEN cross-origin
+     headers: { Accept: 'application/json' },
+   })
+
+   api.interceptors.response.use(undefined, async (error) => {
+     const { response, config } = error
+     if (response?.status === 419 && !config._csrfRetried) {
+       config._csrfRetried = true
+       await api.get('/sanctum/csrf-cookie')
+       return api(config)
+     }
+     if (response?.status === 401) authStore.markSignedOut()
+     return Promise.reject(error)
+   })
+   ```
 6. **Route guards.** Browsing needs no account. Before checkout, require a signed-in customer and
    redirect guests to sign-in with the intended path; require `email_verified` before placing an order.
 7. **Social buttons.** `window.location.assign(API + '/api/v1/auth/social/' + provider +

@@ -10,6 +10,7 @@ use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Collection;
 use Illuminate\Testing\TestResponse;
+use Tests\Support\Browser;
 use Tests\TestCase;
 
 /*
@@ -161,4 +162,20 @@ function registerCustomer(array $overrides = [], array $headers = []): TestRespo
 function verificationLinkFor(User $customer): string
 {
     return (new VerifyEmailNotification)->toMail($customer)->actionUrl;
+}
+
+/**
+ * A browser running the web app, with real cookies, sessions and CSRF (see Tests\Support\Browser).
+ */
+function browser(): Browser
+{
+    return new Browser(test()->target);
+}
+
+/**
+ * A customer who registered with the default test password.
+ */
+function customer(array $attributes = []): User
+{
+    return User::factory()->create(['email' => 'ivan@example.com', 'password' => 'ExamplePassword123!', ...$attributes]);
 }

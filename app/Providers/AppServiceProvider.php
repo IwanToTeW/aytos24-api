@@ -29,6 +29,9 @@ class AppServiceProvider extends ServiceProvider
         // Authentication limits (config/auth.php, documented in docs/api/authentication.md).
         RateLimiter::for('register', fn (Request $request) => Limit::perHour(config('auth.rate_limits.register_per_hour'))
             ->by($request->ip()));
+        // Login requests per IP; failed attempts per email + IP are limited in LoginController.
+        RateLimiter::for('login', fn (Request $request) => Limit::perMinute(config('auth.rate_limits.login_per_minute'))
+            ->by($request->ip()));
         RateLimiter::for('verify-email', fn (Request $request) => Limit::perMinute(config('auth.rate_limits.verify_email_per_minute'))
             ->by($request->ip()));
         RateLimiter::for('verification-notification', fn (Request $request) => Limit::perMinute(config('auth.rate_limits.verification_notification_per_minute'))
