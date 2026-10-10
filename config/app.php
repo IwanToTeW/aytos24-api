@@ -56,6 +56,19 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Frontend URL
+    |--------------------------------------------------------------------------
+    |
+    | Origin of the Vue web app (scheme://host[:port], no trailing slash). The
+    | only destination of browser redirects such as the email verification
+    | result page; redirect targets are never taken from request input.
+    |
+    */
+
+    'frontend_url' => rtrim((string) env('FRONTEND_URL', 'http://localhost:5173'), '/'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Application Timezone
     |--------------------------------------------------------------------------
     |
@@ -81,6 +94,9 @@ return [
     'locale' => env('APP_LOCALE', 'en'),
 
     'fallback_locale' => env('APP_FALLBACK_LOCALE', 'en'),
+
+    // Locales a client may request with Accept-Language (see docs/api/authentication.md).
+    'supported_locales' => ['bg', 'en'],
 
     'faker_locale' => env('APP_FAKER_LOCALE', 'en_US'),
 

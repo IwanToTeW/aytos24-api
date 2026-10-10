@@ -15,6 +15,11 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
         // Applies the "api" rate limiter (AppServiceProvider) to every route in routes/api.php.
         $middleware->throttleApi();
+
+        // Guests get JSON 401 from the API (no login route exists); anything else goes to the web app.
+        $middleware->redirectGuestsTo(
+            fn (Request $request) => $request->is('api/*') ? null : config('app.frontend_url').'/login',
+        );
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->shouldRenderJsonWhen(

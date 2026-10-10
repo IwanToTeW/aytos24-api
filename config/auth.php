@@ -114,4 +114,35 @@ return [
 
     'password_timeout' => env('AUTH_PASSWORD_TIMEOUT', 10800),
 
+    /*
+    |--------------------------------------------------------------------------
+    | Email Verification
+    |--------------------------------------------------------------------------
+    |
+    | Minutes a signed email verification link stays valid (24 hours).
+    |
+    */
+
+    'verification' => [
+        'expire' => (int) env('AUTH_VERIFICATION_EXPIRE', 1440),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Rate Limits
+    |--------------------------------------------------------------------------
+    |
+    | Limits of the authentication endpoints, on top of the general API limit.
+    | Registered in AppServiceProvider and documented in
+    | docs/api/authentication.md.
+    |
+    */
+
+    'rate_limits' => [
+        'register_per_hour' => (int) env('AUTH_REGISTER_LIMIT_PER_HOUR', 10),
+        'verify_email_per_minute' => (int) env('AUTH_VERIFY_EMAIL_LIMIT_PER_MINUTE', 6),
+        'verification_notification_per_minute' => (int) env('AUTH_VERIFICATION_NOTIFICATION_LIMIT_PER_MINUTE', 6),
+        'csrf_cookie_per_minute' => (int) env('AUTH_CSRF_COOKIE_LIMIT_PER_MINUTE', 60),
+    ],
+
 ];

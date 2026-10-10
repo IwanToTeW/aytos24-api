@@ -1,0 +1,10 @@
+{
+    "Whoops!": "Опа!",
+    "Hello!": "Здравейте!",
+    "Regards,": "Поздрави,",
+    "If you're having trouble clicking the \":actionText\" button, copy and paste the URL below\ninto your web browser:": "Ако бутонът „:actionText“ не работи, копирайте адреса по-долу\nи го поставете в браузъра си:",
+    "All rights reserved.": "Всички права запазени.",
+    "(and :count more error)": "(и още :count грешка)",
+    "(and :count more errors)": "(и още :count грешки)",
+    "The given data was invalid.": "Данните са невалидни."
+}

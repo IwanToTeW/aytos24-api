@@ -4,6 +4,8 @@ use App\Models\DailyMenu;
 use App\Models\DailyMenuItem;
 use App\Models\Meal;
 use App\Models\Restaurant;
+use App\Models\User;
+use App\Notifications\VerifyEmailNotification;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Collection;
@@ -115,4 +117,48 @@ function expectedRotation(Collection $items): array
         ->pluck('meal_id')
         ->values()
         ->all();
+}
+
+/**
+ * Headers of a request from the Vue web app, which Sanctum treats as stateful (session + CSRF).
+ *
+ * @return array<string, string>
+ */
+function frontendHeaders(): array
+{
+    return ['Origin' => 'http://localhost:5173', 'Referer' => 'http://localhost:5173/'];
+}
+
+/**
+ * @param  array<string, mixed>  $overrides
+ * @return array<string, mixed>
+ */
+function registrationPayload(array $overrides = []): array
+{
+    return [
+        'name' => 'Ivan',
+        'email' => 'ivan@example.com',
+        'password' => 'ExamplePassword123!',
+        'password_confirmation' => 'ExamplePassword123!',
+        ...$overrides,
+    ];
+}
+
+/**
+ * POST /api/v1/auth/register from the web app.
+ *
+ * @param  array<string, mixed>  $overrides
+ * @param  array<string, string>  $headers
+ */
+function registerCustomer(array $overrides = [], array $headers = []): TestResponse
+{
+    return test()->postJson('/api/v1/auth/register', registrationPayload($overrides), [...frontendHeaders(), ...$headers]);
+}
+
+/**
+ * The link the customer would receive in the verification email.
+ */
+function verificationLinkFor(User $customer): string
+{
+    return (new VerifyEmailNotification)->toMail($customer)->actionUrl;
 }

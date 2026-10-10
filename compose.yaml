@@ -11,6 +11,20 @@ services:
       mysql:
         condition: service_healthy
 
+  # Processes queued jobs, e.g. verification emails. queue:listen reloads code for every job.
+  queue:
+    build:
+      context: .
+      args:
+        UID: ${UID:-1000}
+        GID: ${GID:-1000}
+    command: php artisan queue:listen --tries=3
+    volumes:
+      - .:/var/www/html
+    depends_on:
+      mysql:
+        condition: service_healthy
+
   nginx:
     image: nginx:1.27-alpine
     ports:

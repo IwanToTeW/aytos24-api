@@ -24,6 +24,8 @@ services:
       SESSION_DRIVER: array
       QUEUE_CONNECTION: sync
       CORS_ALLOWED_ORIGINS: ${E2E_CORS_ALLOWED_ORIGINS:-http://localhost:5175}
+      FRONTEND_URL: ${E2E_FRONTEND_URL:-http://localhost:5175}
+      SANCTUM_STATEFUL_DOMAINS: ${E2E_SANCTUM_STATEFUL_DOMAINS:-localhost:5175}
     depends_on:
       mysql:
         condition: service_healthy

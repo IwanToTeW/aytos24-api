@@ -13,33 +13,116 @@ placing an order.
 
 ## Implementation status
 
-**Nothing in this document is implemented yet.** Every endpoint below is *contract only*: no route
-exists, and clients must not call it until the ticket in the "Ticket" column ships. In the OpenAPI
-spec each operation carries `x-implementation-status: contract-only` and `x-implemented-in`.
+Endpoints marked *Implemented* are live. Everything else is *contract only*: no route exists, and
+clients must not call it until the ticket in the "Ticket" column ships. In the OpenAPI spec each
+operation carries `x-implementation-status` (`implemented` or `contract-only`) and `x-implemented-in`.
 
 | Capability | Status | Ticket |
 | --- | --- | --- |
-| Registration and email verification | Contract only | BE-006 |
-| Login, logout, Sanctum sessions, current user | Contract only | BE-007 |
+| CSRF initialisation (`GET /sanctum/csrf-cookie`) | **Implemented** | BE-006 |
+| Registration and email verification | **Implemented** | BE-006 |
+| Login, logout, current user | Contract only | BE-007 |
 | Google, Facebook and Apple sign-in | Contract only | BE-008 |
 | Password reset and recovery | Contract only | BE-009 |
 | Profile retrieval and update | Contract only | BE-010 |
 | Linking and unlinking social accounts | Contract only (rules below) | BE-011 |
 | Native (Capacitor) token authentication | Strategy only, no endpoints | — |
 
-What exists today (verified for this ticket):
+Platform: Laravel **13.35.0**, PHP 8.4 in Docker, **Laravel Sanctum 4.3** (added in BE-006).
+Laravel Socialite is not installed yet; BE-008 adds `laravel/socialite` and, because Socialite has no
+built-in Apple driver, `socialiteproviders/apple`.
 
-- Laravel **13.35.0** (`composer.lock`); `composer.json` allows PHP `^8.3`, the Docker image runs 8.4.
-- The default `users` table (`name`, `email` unique, `email_verified_at`, `password`, `remember_token`),
-  plus `password_reset_tokens` and `sessions` tables. `SESSION_DRIVER=database`, `SESSION_LIFETIME=120`.
-- The default `web` session guard and `users` password broker (`expire` 60 minutes, `throttle` 60 s).
-- `App\Models\User` with `password` hidden and hashed, not yet `MustVerifyEmail`.
-- **Laravel Sanctum and Laravel Socialite are not installed.** BE-007 adds `laravel/sanctum`;
-  BE-008 adds `laravel/socialite` and, because Socialite has no built-in Apple driver,
-  `socialiteproviders/apple`.
-- `config/cors.php` currently allows only `GET`, `HEAD` and `OPTIONS` without credentials (see
-  [`docs/cors.md`](../cors.md)); BE-007 changes it as described in
-  [Required configuration](#required-configuration).
+### What BE-006 implemented
+
+| Piece | Where |
+| --- | --- |
+| Customer model: the existing `User`, now `MustVerifyEmail` and `HasLocalePreference`; new nullable `phone` and `locale` columns | `app/Models/User.php`, `database/migrations/2026_10_10_000001_*` |
+| Sanctum (stateful SPA auth); its `personal_access_tokens` table exists for future native tokens, none are issued | `config/sanctum.php` |
+| `POST /api/v1/auth/register` | `RegisterController`, `RegisterCustomerRequest` |
+| `GET /api/v1/auth/verify-email/{id}/{hash}` | `VerifyEmailController` |
+| `POST /api/v1/auth/email/verification-notification` | `EmailVerificationNotificationController` |
+| `GET /sanctum/csrf-cookie`, re-registered with a rate limit | `routes/web.php` |
+| Customer representation, reused by BE-007 and BE-010 | `app/Http/Resources/V1/CustomerResource.php` |
+| Queued, localised verification email | `app/Notifications/VerifyEmailNotification.php`, `lang/{bg,en}/notifications.php`, `lang/bg.json` |
+| Bulgarian validation messages | `lang/bg/validation.php` (rules not translated there fall back to English) |
+| Locale from `Accept-Language` on authentication routes | `app/Http/Middleware/SetLocaleFromAcceptLanguage.php` |
+| Rate limits and password policy | `config/auth.php`, `app/Providers/AppServiceProvider.php` |
+| Queue worker for local Docker | `queue` service in `compose.yaml` |
+
+**Sessions only on authentication routes.** Sanctum's stateful middleware
+(`EnsureFrontendRequestsAreStateful`) is applied to the `/api/v1/auth` route group instead of the whole
+API (`statefulApi()`), so food discovery stays stateless and never creates session rows. Future
+authenticated groups (`/api/v1/me`, checkout) must add the same middleware.
+
+**Registration in detail.**
+
+- `name` and `email` are trimmed (global `TrimStrings` middleware; passwords are never trimmed), the
+  email is lowercased before validation, and uniqueness is checked against the lowercased address. A
+  concurrent duplicate that slips past validation hits the unique index and is still answered with the
+  same `422` on `email`, never a database error.
+- Only `name`, `email` and `password` from the request reach the record (`customerAttributes()`); the
+  password is hashed by the model's `hashed` cast (bcrypt). Other fields (`id`, `email_verified_at`,
+  `phone`, `remember_token`, …) are ignored.
+- Laravel's `Registered` event is dispatched; its listener queues the verification email. If
+  dispatching fails, the error is reported to the log and registration still answers `201` — the
+  customer can resend the email.
+- For web app requests the customer is signed in on the `web` guard (with a remember-me cookie when
+  `remember` is `true`) and the session ID is regenerated. No token is ever returned.
+- **Native limitation:** requests without a web app `Origin`/`Referer` get the account and the email but
+  no session and no token, because native token issuance is not implemented yet (section 3).
+
+**Email verification in detail.** The link is checked in this order: signature (else `invalid`),
+expiry (else `expired`), customer ID and email hash (else `invalid`), already verified
+(`already-verified`); only then is `email_verified_at` set and Laravel's `Verified` event dispatched
+(`verified`). The redirect target is always `FRONTEND_URL` + `/email-verified?status=…`; nothing in the
+request can change it. Unverified customers can use every authenticated endpoint; routes that need a
+verified email use Laravel's `verified` middleware, which answers `403`
+`{"message": "Your email address is not verified."}`.
+
+**Resend.** The contract's `202 Accepted` with no body is kept, also for already verified customers
+(nothing is sent then). The BE-006 ticket text suggested `200` with
+`{"message": "Verification email sent."}`; the approved contract was followed instead so that clients
+never depend on message text.
+
+### Mail and queue configuration
+
+Laravel's standard mail settings, all from the environment (never committed):
+
+```dotenv
+MAIL_MAILER=smtp                 # local Docker default: log (emails, including links, go to storage/logs)
+MAIL_HOST=smtp.provider.example
+MAIL_PORT=587
+MAIL_USERNAME=…
+MAIL_PASSWORD=…
+MAIL_FROM_ADDRESS=no-reply@aytos24.example
+MAIL_FROM_NAME="Aytos24"
+APP_NAME=Aytos24                 # shown in the email header and footer
+APP_URL=https://api.aytos24.example   # base of the signed verification links
+FRONTEND_URL=https://aytos24.example  # target of the verification result redirect
+AUTH_VERIFICATION_EXPIRE=1440    # link lifetime in minutes
+QUEUE_CONNECTION=database
+```
+
+- The verification email is a queued notification (`database` queue, retried 3 times with back-off).
+  Registration only inserts the job, so a stopped worker never fails registration; emails go out when a
+  worker runs. Locally the `queue` service in `compose.yaml` runs `php artisan queue:listen`; production
+  needs a supervised `php artisan queue:work`.
+- Failed deliveries are logged by the worker and kept in `failed_jobs` (`php artisan queue:failed`).
+  The job payload contains neither the password nor the signed link (the link is built when the email is
+  sent).
+- `MAIL_MAILER=log` writes whole emails, including working verification links, to the application log.
+  Use it only locally.
+- The email's language is the customer's stored `locale` (from `Accept-Language` at registration), else
+  `APP_LOCALE`. Production sets `APP_LOCALE=bg`.
+
+### Rate limits (configurable)
+
+| Limiter | Default | Environment variable |
+| --- | --- | --- |
+| `register` (per IP) | 10 per hour | `AUTH_REGISTER_LIMIT_PER_HOUR` |
+| `verify-email` (per IP) | 6 per minute | `AUTH_VERIFY_EMAIL_LIMIT_PER_MINUTE` |
+| `verification-notification` (per customer) | 6 per minute | `AUTH_VERIFICATION_NOTIFICATION_LIMIT_PER_MINUTE` |
+| `csrf-cookie` (per IP) | 60 per minute | `AUTH_CSRF_COOKIE_LIMIT_PER_MINUTE` |
 
 ## Contents
 
@@ -117,7 +200,7 @@ not supported by this contract.
 
 ### Required configuration
 
-To be applied in BE-007 (not changed by this ticket):
+Applied in BE-006 (`.env.example`, `config/cors.php`, `config/sanctum.php`). Production values:
 
 ```dotenv
 FRONTEND_URL=https://aytos24.example
@@ -134,11 +217,14 @@ Locally: `FRONTEND_URL=http://localhost:5173`, `SANCTUM_STATEFUL_DOMAINS=localho
 `SESSION_DOMAIN=null`, `SESSION_SECURE_COOKIE=false`. `SANCTUM_STATEFUL_DOMAINS` lists hosts with port
 and without scheme; `CORS_ALLOWED_ORIGINS` lists full origins.
 
-- `bootstrap/app.php`: `$middleware->statefulApi()` so API requests from stateful origins get
-  sessions and CSRF verification.
-- `config/cors.php`: `paths` add `sanctum/csrf-cookie`; `allowed_methods` add `POST` and `PATCH`;
-  `allowed_headers` add `X-XSRF-TOKEN` and `X-Requested-With`; `supports_credentials` becomes `true`.
+- `routes/api.php`: Sanctum's `EnsureFrontendRequestsAreStateful` on the authentication route groups
+  (not `statefulApi()` on the whole API), so their requests from stateful origins get sessions and CSRF
+  verification while food discovery stays stateless.
+- `config/cors.php`: paths `api/*` and `sanctum/csrf-cookie`; methods `GET`, `HEAD`, `POST`, `PATCH`,
+  `OPTIONS`; headers include `X-XSRF-TOKEN` and `X-Requested-With`; `supports_credentials` is `true`.
   `allowed_origins` must stay an explicit list — a credentialed wildcard is never allowed.
+- Behind a TLS-terminating proxy, configure trusted proxies so `APP_URL`, signed links and secure
+  cookies see the original `https` scheme and host.
 - HTTPS is mandatory in production for both the web app and the API.
 
 ## 3. Future native authentication
@@ -175,15 +261,15 @@ All paths are relative to the API host. Base URL locally: `http://localhost:8000
 
 | Method | Path | Authentication | Status | Ticket | Purpose |
 | --- | --- | --- | --- | --- | --- |
-| `GET` | `/sanctum/csrf-cookie` | Guest | Contract only | BE-007 | Initialise CSRF protection (browser only) |
-| `POST` | `/api/v1/auth/register` | Guest | Contract only | BE-006 | Register a customer |
+| `GET` | `/sanctum/csrf-cookie` | Guest | Implemented | BE-006 | Initialise CSRF protection (browser only) |
+| `POST` | `/api/v1/auth/register` | Guest | Implemented | BE-006 | Register a customer |
 | `POST` | `/api/v1/auth/login` | Guest | Contract only | BE-007 | Sign in with email and password |
 | `POST` | `/api/v1/auth/logout` | Required | Contract only | BE-007 | End the current session or revoke the current token |
 | `GET` | `/api/v1/auth/user` | Required | Contract only | BE-007 | Get the authenticated customer |
 | `POST` | `/api/v1/auth/forgot-password` | Guest | Contract only | BE-009 | Request a password reset email |
 | `POST` | `/api/v1/auth/reset-password` | Guest | Contract only | BE-009 | Reset the password with a token |
-| `GET` | `/api/v1/auth/verify-email/{id}/{hash}` | Signed link | Contract only | BE-006 | Verify an email address (redirects) |
-| `POST` | `/api/v1/auth/email/verification-notification` | Required | Contract only | BE-006 | Resend the verification email |
+| `GET` | `/api/v1/auth/verify-email/{id}/{hash}` | Signed link | Implemented | BE-006 | Verify an email address (redirects) |
+| `POST` | `/api/v1/auth/email/verification-notification` | Required | Implemented | BE-006 | Resend the verification email |
 | `GET` | `/api/v1/auth/social/{provider}/redirect` | Guest | Contract only | BE-008 | Start Google, Facebook or Apple sign-in |
 | `GET` | `/api/v1/auth/social/{provider}/callback` | Guest | Contract only | BE-008 | OAuth callback for Google and Facebook |
 | `POST` | `/api/v1/auth/social/{provider}/callback` | Guest | Contract only | BE-008 | OAuth callback for Apple (`form_post`) |
