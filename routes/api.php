@@ -2,9 +2,11 @@
 
 use App\Http\Controllers\Api\V1\Auth\CurrentCustomerController;
 use App\Http\Controllers\Api\V1\Auth\EmailVerificationNotificationController;
+use App\Http\Controllers\Api\V1\Auth\ForgotPasswordController;
 use App\Http\Controllers\Api\V1\Auth\LoginController;
 use App\Http\Controllers\Api\V1\Auth\LogoutController;
 use App\Http\Controllers\Api\V1\Auth\RegisterController;
+use App\Http\Controllers\Api\V1\Auth\ResetPasswordController;
 use App\Http\Controllers\Api\V1\Auth\VerifyEmailController;
 use App\Http\Controllers\Api\V1\HelloController;
 use App\Http\Controllers\Api\V1\TodayMealController;
@@ -39,6 +41,14 @@ Route::prefix('v1')->group(function () {
             Route::get('user', CurrentCustomerController::class)
                 ->middleware('auth:sanctum')
                 ->name('user');
+
+            Route::post('forgot-password', ForgotPasswordController::class)
+                ->middleware('throttle:forgot-password')
+                ->name('forgot-password');
+
+            Route::post('reset-password', ResetPasswordController::class)
+                ->middleware('throttle:reset-password')
+                ->name('reset-password');
 
             Route::get('verify-email/{id}/{hash}', VerifyEmailController::class)
                 ->middleware('throttle:verify-email')

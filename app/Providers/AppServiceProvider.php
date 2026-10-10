@@ -36,10 +36,15 @@ class AppServiceProvider extends ServiceProvider
             ->by($request->ip()));
         RateLimiter::for('verification-notification', fn (Request $request) => Limit::perMinute(config('auth.rate_limits.verification_notification_per_minute'))
             ->by($request->user()?->getAuthIdentifier() ?? $request->ip()));
+        // Per IP only, never per email, so a 429 says nothing about whether an account exists.
+        RateLimiter::for('forgot-password', fn (Request $request) => Limit::perHour(config('auth.rate_limits.forgot_password_per_hour'))
+            ->by($request->ip()));
+        RateLimiter::for('reset-password', fn (Request $request) => Limit::perMinute(config('auth.rate_limits.reset_password_per_minute'))
+            ->by($request->ip()));
         RateLimiter::for('csrf-cookie', fn (Request $request) => Limit::perMinute(config('auth.rate_limits.csrf_cookie_per_minute'))
             ->by($request->ip()));
 
-        // Customer password policy (registration, and password reset in BE-009).
+        // Customer password policy (registration and password reset).
         Password::defaults(fn () => Password::min(8)
             ->max(128)
             ->letters()

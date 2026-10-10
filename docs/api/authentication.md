@@ -23,7 +23,7 @@ operation carries `x-implementation-status` (`implemented` or `contract-only`) a
 | Registration and email verification | **Implemented** | BE-006 |
 | Login, logout, current user, session management | **Implemented** | BE-007 |
 | Google, Facebook and Apple sign-in | Contract only | BE-008 |
-| Password reset and recovery | Contract only | BE-009 |
+| Password reset and recovery | **Implemented** | BE-009 |
 | Profile retrieval and update | Contract only | BE-010 |
 | Linking and unlinking social accounts | Contract only (rules below) | BE-011 |
 | Native (Capacitor) token authentication | Strategy only, no endpoints | — |
@@ -100,6 +100,8 @@ APP_NAME=Aytos24                 # shown in the email header and footer
 APP_URL=https://api.aytos24.example   # base of the signed verification links
 FRONTEND_URL=https://aytos24.example  # target of the verification result redirect
 AUTH_VERIFICATION_EXPIRE=1440    # link lifetime in minutes
+AUTH_PASSWORD_RESET_EXPIRE=60    # reset link lifetime in minutes
+AUTH_PASSWORD_RESET_THROTTLE=60  # seconds between reset emails per account
 QUEUE_CONNECTION=database
 ```
 
@@ -112,6 +114,7 @@ QUEUE_CONNECTION=database
   sent).
 - `MAIL_MAILER=log` writes whole emails, including working verification links, to the application log.
   Use it only locally.
+- The password reset email (BE-009) is queued the same way, and its job is encrypted.
 - The email's language is the customer's stored `locale` (from `Accept-Language` at registration), else
   `APP_LOCALE`. Production sets `APP_LOCALE=bg`.
 
@@ -125,6 +128,8 @@ QUEUE_CONNECTION=database
 | `csrf-cookie` (per IP) | 60 per minute | `AUTH_CSRF_COOKIE_LIMIT_PER_MINUTE` |
 | `login` (per IP, all requests) | 20 per minute | `AUTH_LOGIN_LIMIT_PER_MINUTE` |
 | Failed logins (per email + IP) | 5 per minute | `AUTH_LOGIN_FAILURES_PER_MINUTE` |
+| `forgot-password` (per IP) | 20 per hour | `AUTH_FORGOT_PASSWORD_LIMIT_PER_HOUR` |
+| `reset-password` (per IP) | 5 per minute | `AUTH_RESET_PASSWORD_LIMIT_PER_MINUTE` |
 
 ### What BE-007 implemented
 
@@ -168,6 +173,28 @@ limited) but get no session and no token. No personal access tokens are issued a
 
 **Status codes kept from the contract.** The BE-007 ticket text mentions `200` for logout; the
 approved contract's `204 No Content` is kept, as for the other bodiless responses.
+
+### What BE-009 implemented
+
+| Piece | Where |
+| --- | --- |
+| `POST /api/v1/auth/forgot-password` | `ForgotPasswordController`, `ForgotPasswordRequest` |
+| `POST /api/v1/auth/reset-password` | `ResetPasswordController`, `ResetPasswordRequest` |
+| Queued, encrypted, localised reset email linking to the web app | `app/Notifications/ResetPasswordNotification.php`, `lang/{bg,en}/notifications.php` |
+| API messages | `lang/{bg,en}/passwords.php` |
+| `users.password` nullable for social-only customers (BE-008 creates them) | `database/migrations/2026_10_10_000002_*`, `UserFactory::socialOnly()`, `User::hasPassword()` |
+| Token lifetime, cooldown, timebox and rate limits from the environment | `config/auth.php`, `app/Providers/AppServiceProvider.php` |
+
+Both endpoints use Laravel's own password broker (`Password::broker()`, `config/auth.php` →
+`passwords.users`) and its `password_reset_tokens` table; there is no custom token mechanism. Behaviour
+is described in [section 13](#13-password-recovery-behaviour).
+
+**Deviations from the BE-005 contract, approved with BE-009:** both endpoints answer `200` with a
+`message` instead of `202`/`204` without a body; the reset link carries the token in the **query
+string** instead of the URL fragment; social-only customers do **not** get a reset link (setting a
+first password is BE-011's decision); a reset does not delete other sessions, revoke Sanctum tokens or
+send a "password changed" email (see section 14 for what does happen). `openapi.yaml` was updated to
+match.
 
 ## Contents
 
@@ -334,8 +361,8 @@ All paths are relative to the API host. Base URL locally: `http://localhost:8000
 | `POST` | `/api/v1/auth/login` | Guest | Implemented | BE-007 | Sign in with email and password |
 | `POST` | `/api/v1/auth/logout` | Required | Implemented | BE-007 | End the current session or revoke the current token |
 | `GET` | `/api/v1/auth/user` | Required | Implemented | BE-007 | Get the authenticated customer |
-| `POST` | `/api/v1/auth/forgot-password` | Guest | Contract only | BE-009 | Request a password reset email |
-| `POST` | `/api/v1/auth/reset-password` | Guest | Contract only | BE-009 | Reset the password with a token |
+| `POST` | `/api/v1/auth/forgot-password` | Guest | Implemented | BE-009 | Request a password reset email |
+| `POST` | `/api/v1/auth/reset-password` | Guest | Implemented | BE-009 | Reset the password with a token |
 | `GET` | `/api/v1/auth/verify-email/{id}/{hash}` | Signed link | Implemented | BE-006 | Verify an email address (redirects) |
 | `POST` | `/api/v1/auth/email/verification-notification` | Required | Implemented | BE-006 | Resend the verification email |
 | `GET` | `/api/v1/auth/social/{provider}/redirect` | Guest | Contract only | BE-008 | Start Google, Facebook or Apple sign-in |
@@ -361,7 +388,7 @@ signed-in requests, so customers behind a shared mobile-carrier IP are not throt
 | `GET /sanctum/csrf-cookie` | 60 per minute per IP — Sanctum's own route is unthrottled and creates a database session row per call, so BE-007 re-registers it (`Sanctum::ignoreRoutes()`) with this limit |
 | `register` | 10 per hour per IP |
 | `login` | 5 failed attempts per minute per email + IP; 20 requests per minute per IP |
-| `forgot-password` | 5 per hour per email; 20 per hour per IP |
+| `forgot-password` | 20 per hour per IP (never per email, see section 13) |
 | `reset-password` | 5 per minute per IP |
 | `verify-email` | 6 per minute per IP |
 | `email/verification-notification` | 6 per minute per customer |
@@ -504,8 +531,14 @@ Request:
 }
 ```
 
-`202 Accepted`, no body — for registered and unknown emails alike. `422` only for a missing or
-malformed email.
+`200 OK` — the same body for every valid email (known, unknown, social-only, within the cooldown, or when
+the email could not be queued). `422` only for a missing or malformed email:
+
+```json
+{
+  "message": "If an account exists for this email address, a password reset link will be sent."
+}
+```
 
 #### `POST /api/v1/auth/reset-password`
 
@@ -520,13 +553,21 @@ Request:
 }
 ```
 
-`204 No Content` on success. `422` for an invalid, expired or used token:
+`200 OK` on success (the customer is **not** signed in):
 
 ```json
 {
-  "message": "This password reset token is invalid.",
+  "message": "Your password has been reset successfully."
+}
+```
+
+`422` for an invalid, expired, used or foreign token, or an unknown email — always this body:
+
+```json
+{
+  "message": "The password reset link is invalid or has expired.",
   "errors": {
-    "token": ["This password reset token is invalid."]
+    "token": ["The password reset link is invalid or has expired."]
   }
 }
 ```
@@ -655,7 +696,8 @@ lowercased before validation and storage.
 | login | `email` | required, valid email, max 255 |
 | login | `password` | required string (policy not applied at login) |
 | forgot-password | `email` | required, valid email, max 255 |
-| reset-password | `email`, `token` | required |
+| reset-password | `email` | required, valid email, max 255 (lowercased) |
+| reset-password | `token` | required string, max 255 |
 | reset-password | `password`, `password_confirmation` | as register |
 | `PATCH /me` | `name` | optional; if present: string, 1–255, not `null` |
 | `PATCH /me` | `phone` | optional; `null`/`""` removes it; otherwise normalised to E.164 |
@@ -689,8 +731,8 @@ single leading `0` with `+359`; the result must match `^\+[1-9][0-9]{7,14}$` (E.
 | `POST /auth/login` | `200` | customer resource |
 | `POST /auth/logout` | `204` | none |
 | `GET /auth/user` | `200` | customer resource |
-| `POST /auth/forgot-password` | `202` | none |
-| `POST /auth/reset-password` | `204` | none |
+| `POST /auth/forgot-password` | `200` | `{"message": …}`, identical for every valid email |
+| `POST /auth/reset-password` | `200` | `{"message": …}` |
 | `GET /auth/verify-email/{id}/{hash}` | `302` | redirect to the frontend |
 | `POST /auth/email/verification-notification` | `202` | none |
 | `GET /auth/social/{provider}/redirect` | `302` | redirect to the provider |
@@ -846,7 +888,7 @@ once during the callback and **never stored or returned**: Aytos24 needs the ide
 
 ### Data model (BE-008, BE-011)
 
-- `users`: the customer. `password` becomes nullable (social-only customers have none).
+- `users`: the customer. `password` is nullable (social-only customers have none; made nullable in BE-009).
 - `social_accounts`: `user_id`, `provider`, `provider_user_id`, `provider_email` (informational),
   timestamps. Unique on (`provider`, `provider_user_id`): a provider identity belongs to at most one
   customer. Unique on (`user_id`, `provider`): at most one account per provider per customer.
@@ -879,7 +921,8 @@ once during the callback and **never stored or returned**: Aytos24 needs the ide
 - Linking requires a recent authentication (password confirmation or sign-in within the last
   10 minutes).
 - A customer cannot remove their last sign-in method: unlinking is refused if no other provider is
-  linked and no password is set. Social-only customers set a password through forgot-password.
+  linked and no password is set. Forgot-password does **not** give social-only customers a password
+  (BE-009); any social-to-password conversion flow is defined in BE-011.
 
 ### Apple specifics
 
@@ -914,22 +957,117 @@ once during the callback and **never stored or returned**: Aytos24 needs the ide
 
 ## 13. Password recovery behaviour
 
-- `POST /forgot-password` always answers `202` with no body, whether or not the account exists, and
-  whether or not the broker's 60-second per-email throttle suppressed the email. The route limiter
-  (`429`) applies to every email equally, so it reveals nothing either.
-- For an existing customer, a reset email is queued with a link to the **frontend**:
-  `{FRONTEND_URL}/reset-password#token=<token>&email=<email>`. The token is in the URL fragment so it is
-  never sent to any server, proxy log or `Referer`. The frontend reads it, removes it from the address
-  bar (`history.replaceState`) and posts it to `/reset-password`.
-- Tokens are stored hashed (`password_reset_tokens`), expire after **60 minutes** and are deleted after
-  use. Requesting a new link replaces the previous token. Tokens are never returned by the API, in any
-  environment.
-- `POST /reset-password` answers `422` on `token` for invalid, expired, used or foreign tokens and for
-  unknown emails, with identical bodies.
-- A successful reset (`204`): sets the new hashed password, rotates `remember_token`, deletes all of the
-  customer's sessions and Sanctum tokens, and sends a "your password was changed" notification. The
-  customer is not signed in and signs in with the new password.
-- Social-only customers (no password) use the same flow to set a password.
+### Flow (FE-008)
+
+```text
+Vue app                                   API                                         Customer's inbox
+  | POST /api/v1/auth/forgot-password {email}
+  |-------------------------------------->| eligible? store hashed token, queue email ---> (only if eligible)
+  |<-- 200 generic message ---------------|
+  |   "If an account exists …"            |
+  |                                       |        {FRONTEND_URL}/reset-password?token=…&email=… <--|
+  | POST /api/v1/auth/reset-password {email, token, password, password_confirmation}
+  |-------------------------------------->| broker checks token, saves hash, deletes token
+  |<-- 200 "Your password has been reset successfully." (or 422 on token)
+  | → sign-in page; the customer signs in normally with the new password
+```
+
+### `POST /forgot-password`
+
+- The email is trimmed and lowercased exactly as at registration and login, then validated (`422` only
+  for a missing or malformed email).
+- Every valid request gets **the same `200` body**. The response never contains the token, the broker
+  status, the account type, the customer ID or whether an email was sent or delivered. Clients must say
+  "if an account exists, we've sent a link", never "email sent".
+- A reset email is queued only when **all** of these hold:
+  1. a customer with this email exists;
+  2. the customer has a local password (`users.password` is not `null`) — social-only customers get no
+     token and no email, and no password is created for them;
+  3. the broker's cooldown allows a new token: at most one per account per `AUTH_PASSWORD_RESET_THROTTLE`
+     seconds (60). Within the cooldown nothing is sent and the previous link stays valid.
+- Eligibility is part of the broker's user lookup (`whereNotNull('password')`), so a social-only
+  customer follows exactly the unknown-email code path.
+- Timing: the broker runs inside Laravel's `Timebox`, so every request takes at least
+  `AUTH_TIMEBOX_DURATION` µs (200 ms, also used by login). Raise it in production if hashing the token and
+  queueing the email take longer than that; constant time is not guaranteed.
+
+### Tokens
+
+- Laravel's `DatabaseTokenRepository`: 64 random characters, stored **bcrypt-hashed** in
+  `password_reset_tokens` (one row per email; a new link replaces the previous token).
+- Valid for `AUTH_PASSWORD_RESET_EXPIRE` minutes (60). Deleted by the broker after a successful reset,
+  so each link works once.
+- Never returned by the API or logged. While queued, the email job is encrypted (`ShouldBeEncrypted`),
+  so the plain token is not readable in `jobs` or `failed_jobs`.
+
+### Reset email
+
+- `ResetPasswordNotification`: Laravel's `ResetPassword` notification, queued (3 tries with back-off,
+  after the transaction commits) and rendered with the standard Laravel mail layout and `APP_NAME`, like
+  the verification email.
+- Link: `{FRONTEND_URL}/reset-password?token=<token>&email=<email>`, parameters RFC 3986-encoded
+  (`ivan%40example.com`). Only `FRONTEND_URL` is used; nothing from the request (Host, Origin) affects
+  it. In production a non-`https` `FRONTEND_URL` makes the job fail instead of emailing an insecure
+  link.
+- Language: the customer's stored `locale`; customers without one get the language of the request
+  (`Accept-Language`), else `APP_LOCALE`. Subjects: *Възстановяване на парола — Aytos24* /
+  *Reset your password — Aytos24*. The email says why it was sent, how to reset, that the link expires
+  in 60 minutes and works once, and that it can be ignored if unrequested. It never contains a password.
+
+### `POST /reset-password`
+
+- Validation: `email` (lowercased), `token` (string), `password` with `password_confirmation` and the
+  registration password policy (`Password::defaults()`, section 5).
+- `Password::broker()->reset()` checks that a non-expired token exists for that email and matches.
+  Unknown emails, social-only customers, wrong, expired, used and other customers' tokens all get the
+  same `422` on `token`; the response never says which check failed.
+- On success: the password is hashed by the model's `hashed` cast (bcrypt), the remember token is
+  replaced, Laravel's `PasswordReset` event is dispatched and the token deleted. `200` with the success
+  message. The customer is **not** signed in, no session is started and no Sanctum token is issued.
+- What happens to existing sessions: see section 14.
+
+### Rate limits and enumeration
+
+| Protection | Scope | Default | Response |
+| --- | --- | --- | --- |
+| Broker cooldown | per eligible account | 60 s | same `200`, nothing sent |
+| `throttle:forgot-password` | per IP, any email | 20 per hour | `429` + `Retry-After` |
+| `throttle:reset-password` | per IP | 5 per minute | `429` + `Retry-After` |
+
+The HTTP limiters never count per email, so a `429` (and `X-RateLimit-Remaining`) is the same for
+known, unknown and social-only addresses. The general `api` limiter (60 per minute per IP) also applies.
+
+### Delivery failures
+
+- Queued means queued, not delivered. When every attempt fails, the worker stores the job in
+  `failed_jobs` and the notification logs `error` **"Password reset email delivery failed."** with only
+  the exception class. If the email cannot even be queued (e.g. the queue database is down), the
+  controller logs `error` **"Password reset email could not be queued."** the same way and still
+  answers the generic `200`.
+- Alert on those two messages and on `failed_jobs` growth. Neither log line contains the email, token,
+  link or password. Note that the queue worker also reports the underlying exception itself; for SMTP
+  errors that message comes from the mail server and may name the recipient, but never the token or
+  link (they are only in the encrypted job and the email body).
+
+### Local mail testing
+
+`MAIL_MAILER=log` (the local default) writes the whole email, **including a working reset link**, to
+`storage/logs/laravel.log`; never use it in production. The `queue` service in `compose.yaml` sends it.
+To read emails in a mail UI instead, point `MAIL_MAILER=smtp`, `MAIL_HOST`, `MAIL_PORT` at a local
+catcher such as Mailpit. Tests use the `array` mailer and the `sync` queue.
+
+### Frontend rules (FE-008)
+
+- After `forgot-password`, show the generic confirmation; never claim that an email was sent or
+  delivered, and do not vary the UI by anything in the response.
+- The `/reset-password` page reads `token` and `email` from the query string, then removes them from the
+  address bar (`history.replaceState`) as soon as they are in memory. Never send the token or the URL
+  with it to analytics, error tracking or logs, never store it in `localStorage`/`sessionStorage`, and
+  serve the page with `Referrer-Policy: no-referrer` (or `same-origin`) and no third-party resources so
+  the URL does not leak through `Referer`.
+- Post `email`, `token`, `password`, `password_confirmation`; on `200` send the customer to sign-in (they
+  are not signed in); on `422` with `errors.token` offer to request a new link; on `422` with
+  `errors.password` show the policy errors.
 
 ## 14. Session expiration behaviour
 
@@ -943,8 +1081,13 @@ once during the callback and **never stored or returned**: Aytos24 needs the ide
   - `POST`/`PATCH` requests from the browser may answer `419` first, because the CSRF token belonged
     to the expired session. After refreshing the CSRF cookie and retrying, they answer `401`.
 - Public endpoints (meals) are unaffected by an expired session.
-- Sessions also end on logout, on a password reset (all sessions) and when the stored password hash
-  changes (Sanctum's `AuthenticateSession`).
+- Sessions also end on logout, and when the stored password hash changes: Sanctum's
+  `AuthenticateSession` (`config/sanctum.php`, run for stateful requests) compares the hash saved in the
+  session with the customer's current one. After a password reset, every other browser session of the
+  customer is therefore signed out **on its next request**, and the rotated remember token stops
+  remember-me cookies from starting a new one (verified in `ResetPasswordTest`). The session rows are not
+  deleted, and Sanctum personal access tokens (none are issued yet) are not revoked; a server-side
+  "sign out everywhere" is a later feature.
 - Native tokens (future) expire as defined by the native ticket and answer `401` when expired or revoked.
 
 ## 15. Security requirements
@@ -963,7 +1106,7 @@ once during the callback and **never stored or returned**: Aytos24 needs the ide
 | Input validation | Form Requests with the rules in section 5; only validated fields are persisted |
 | HTTPS | Required in production for the API, the web app and all OAuth redirect URIs |
 | Logging | Never log request bodies or headers of auth endpoints. `password`, `password_confirmation`, `current_password` and `token` are excluded from flashed input and exception context; OAuth `code`, `id_token` and provider tokens are never logged |
-| No tokens in URLs | No access token, session ID or provider token in any URL or redirect. The only secrets in URLs are the single-purpose, expiring verification signature and the reset token in a URL fragment |
+| No tokens in URLs | No access token, session ID or provider token in any URL or redirect. The only secrets in URLs are the single-purpose, expiring verification signature and the single-use reset token in the reset link's query string (the frontend strips it, section 13) |
 | No secrets in clients | OAuth client secrets and Apple's private key exist only on the backend |
 | Minimal data | The customer resource exposes only the fields in section 9 |
 | Server errors | `500` with a generic message; never stack traces or internal details (`APP_DEBUG=false` in production) |
@@ -1052,8 +1195,9 @@ For FE-005 (API client and Pinia auth store):
    `phone` first if missing). On error show the message for `error`.
 9. **`/email-verified` page.** Read `status` (`verified`, `already-verified`, `expired`, `invalid`);
    if signed in, refetch `/auth/user`.
-10. **`/reset-password` page.** Read `token` and `email` from the URL **fragment**, clear the
-    fragment, post to `/api/v1/auth/reset-password`, then send the customer to sign-in.
+10. **`/reset-password` page.** Read `token` and `email` from the **query string**, remove them from
+    the address bar, post to `/api/v1/auth/reset-password`, then send the customer to sign-in. See the
+    FE-008 rules in section 13.
 11. **Language.** Send `Accept-Language: bg` or `en` matching the UI language.
 12. **Contract source.** Use this document and `docs/api/openapi.yaml`. `docs/openapi.json`
     (Scramble export, `bin/sync-api-spec`) only lists implemented routes, so contract-only endpoints

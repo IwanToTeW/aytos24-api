@@ -31,8 +31,8 @@ function agreedAuthEndpoints(): array
         'login' => ['post', '/v1/auth/login', 'guest', [200, 419, 422, 429, 500]],
         'logout' => ['post', '/v1/auth/logout', 'required', [204, 401, 419, 429, 500]],
         'current user' => ['get', '/v1/auth/user', 'required', [200, 401, 429, 500]],
-        'forgot password' => ['post', '/v1/auth/forgot-password', 'guest', [202, 419, 422, 429, 500]],
-        'reset password' => ['post', '/v1/auth/reset-password', 'guest', [204, 419, 422, 429, 500]],
+        'forgot password' => ['post', '/v1/auth/forgot-password', 'guest', [200, 419, 422, 429, 500]],
+        'reset password' => ['post', '/v1/auth/reset-password', 'guest', [200, 419, 422, 429, 500]],
         'verify email' => ['get', '/v1/auth/verify-email/{id}/{hash}', 'signed', [302, 429]],
         'resend verification' => ['post', '/v1/auth/email/verification-notification', 'required', [202, 401, 419, 429, 500]],
         'social redirect' => ['get', '/v1/auth/social/{provider}/redirect', 'guest', [302, 404, 429]],
@@ -213,17 +213,26 @@ test('every example in the contract is valid against its schema', function () {
 
 test('every endpoint that returns a customer uses the one shared customer resource', function () {
     $returningCustomer = [];
+    // Password recovery (BE-009) confirms with a message and never returns the customer.
+    $returningMessage = [];
 
     foreach (contractOperations() as ['method' => $method, 'path' => $path, 'operation' => $operation]) {
         foreach ($operation['responses'] as $status => $response) {
             $schema = contractResolve($response)['content']['application/json']['schema'] ?? null;
 
-            if ($status < 300 && $schema !== null) {
+            if ($status < 300 && $schema === ['$ref' => '#/components/schemas/Message']) {
+                $returningMessage[] = "{$method} {$path} {$status}";
+            } elseif ($status < 300 && $schema !== null) {
                 expect($schema)->toBe(['$ref' => '#/components/schemas/CustomerResource']);
                 $returningCustomer[] = "{$method} {$path} {$status}";
             }
         }
     }
+
+    expect($returningMessage)->toEqualCanonicalizing([
+        'post /v1/auth/forgot-password 200',
+        'post /v1/auth/reset-password 200',
+    ]);
 
     expect($returningCustomer)->toEqualCanonicalizing([
         'post /v1/auth/register 201',

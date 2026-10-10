@@ -96,8 +96,8 @@ return [
         'users' => [
             'provider' => 'users',
             'table' => env('AUTH_PASSWORD_RESET_TOKEN_TABLE', 'password_reset_tokens'),
-            'expire' => 60,
-            'throttle' => 60,
+            'expire' => (int) env('AUTH_PASSWORD_RESET_EXPIRE', 60),
+            'throttle' => (int) env('AUTH_PASSWORD_RESET_THROTTLE', 60),
         ],
     ],
 
@@ -111,6 +111,20 @@ return [
     | confirmation screen. By default, the timeout lasts for three hours.
     |
     */
+
+    /*
+    |--------------------------------------------------------------------------
+    | Timebox Duration
+    |--------------------------------------------------------------------------
+    |
+    | Minimum duration, in microseconds, of login attempts and of the password
+    | broker (forgot and reset password), so known and unknown accounts take
+    | the same time. Raise it if the slowest path (hashing a reset token and
+    | queueing the email) takes longer in production.
+    |
+    */
+
+    'timebox_duration' => (int) env('AUTH_TIMEBOX_DURATION', 200000),
 
     'password_timeout' => env('AUTH_PASSWORD_TIMEOUT', 10800),
 
@@ -144,6 +158,8 @@ return [
         'login_failures_per_minute' => (int) env('AUTH_LOGIN_FAILURES_PER_MINUTE', 5),
         'verify_email_per_minute' => (int) env('AUTH_VERIFY_EMAIL_LIMIT_PER_MINUTE', 6),
         'verification_notification_per_minute' => (int) env('AUTH_VERIFICATION_NOTIFICATION_LIMIT_PER_MINUTE', 6),
+        'forgot_password_per_hour' => (int) env('AUTH_FORGOT_PASSWORD_LIMIT_PER_HOUR', 20),
+        'reset_password_per_minute' => (int) env('AUTH_RESET_PASSWORD_LIMIT_PER_MINUTE', 5),
         'csrf_cookie_per_minute' => (int) env('AUTH_CSRF_COOKIE_LIMIT_PER_MINUTE', 60),
     ],
 

@@ -13,4 +13,14 @@ return [
         'salutation' => 'The Aytos24 team',
     ],
 
+    'reset_password' => [
+        'subject' => 'Reset your password — Aytos24',
+        'greeting' => 'Hello!',
+        'reason' => 'You are receiving this email because someone asked to reset the password of the Aytos24 account registered with this email address. Use the button below to choose a new password.',
+        'action' => 'Reset password',
+        'expires' => 'This link expires in :minutes minute and can be used only once.|This link expires in :minutes minutes and can be used only once.',
+        'ignore' => 'If you did not ask to reset your password, you can ignore this email; your password will not change.',
+        'salutation' => 'The Aytos24 team',
+    ],
+
 ];

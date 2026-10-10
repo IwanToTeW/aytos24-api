@@ -592,20 +592,22 @@ paths:
     post:
       tags: [Authentication]
       operationId: requestPasswordReset
-      x-implementation-status: contract-only
+      x-implementation-status: implemented
       x-implemented-in: BE-009
       summary: Request a password reset email
       description: |
-        If an account with this email exists, a reset link valid for 60
-        minutes is emailed (at most one per email per minute). The response
-        is **identical** whether or not the account exists, and whether or
-        not an email was actually sent. The reset token is never returned.
+        If the email belongs to a customer with a password, a link to the
+        web app's reset page, valid for 60 minutes, is emailed (at most one
+        per account per 60 seconds). The response is **identical** for
+        known, unknown and social-only (no password) emails, during the
+        per-account cooldown, and when the email could not be queued. It
+        never says whether an email was sent; the reset token is never
+        returned.
 
-        Customers created through social sign-in, who have no password, use
-        this flow to set one.
+        Social-only customers get no email and no token; this endpoint
+        never creates a password for them (BE-011).
 
-        Rate limit: 5 requests per hour per email address and 20 per hour
-        per IP address.
+        Rate limit: 20 requests per hour per IP address, whatever the email.
       security: []
       parameters:
         - $ref: '#/components/parameters/XsrfToken'
@@ -622,8 +624,17 @@ paths:
                 value:
                   email: ivan@example.com
       responses:
-        '202':
-          description: Accepted. No body. Returned for known and unknown emails alike.
+        '200':
+          description: Request accepted. The same body for every valid email.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+              examples:
+                accepted:
+                  summary: Known and unknown emails alike
+                  value:
+                    message: If an account exists for this email address, a password reset link will be sent.
         '419':
           $ref: '#/components/responses/CsrfTokenMismatch'
         '422':
@@ -649,16 +660,16 @@ paths:
     post:
       tags: [Authentication]
       operationId: resetPassword
-      x-implementation-status: contract-only
+      x-implementation-status: implemented
       x-implemented-in: BE-009
       summary: Set a new password with a reset token
       description: |
         Sets a new password using the token from the reset email. The token
         is single-use and expires 60 minutes after it was issued. A
-        successful reset deletes the token, signs the customer out of every
-        browser session, revokes every native token and rotates the
-        remember-me token. The customer is **not** signed in; the client
-        sends them to the sign-in page.
+        successful reset deletes the token and rotates the remember-me
+        token; other browser sessions of the customer end on their next
+        request. The customer is **not** signed in and no token is issued;
+        the client sends them to the sign-in page.
 
         Invalid, expired and already-used tokens, and tokens that do not
         belong to the given email (including unknown emails), all produce the
@@ -684,8 +695,17 @@ paths:
                   password: NewExamplePassword123!
                   password_confirmation: NewExamplePassword123!
       responses:
-        '204':
-          description: Password changed. No body.
+        '200':
+          description: Password changed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+              examples:
+                reset:
+                  summary: Password changed
+                  value:
+                    message: Your password has been reset successfully.
         '419':
           $ref: '#/components/responses/CsrfTokenMismatch'
         '422':
@@ -698,10 +718,10 @@ paths:
                 invalidToken:
                   summary: Invalid, expired or used token
                   value:
-                    message: This password reset token is invalid.
+                    message: The password reset link is invalid or has expired.
                     errors:
                       token:
-                        - This password reset token is invalid.
+                        - The password reset link is invalid or has expired.
                 weakPassword:
                   summary: Password policy not met
                   value:
@@ -1721,7 +1741,8 @@ components:
         token:
           type: string
           minLength: 1
-          description: The token from the reset link.
+          maxLength: 255
+          description: The `token` query parameter of the reset link.
         password:
           $ref: '#/components/schemas/NewPassword'
         password_confirmation:
@@ -1774,6 +1795,16 @@ components:
         error:
           type: string
           description: '`user_cancelled_authorize` when the customer cancels.'
+
+    Message:
+      type: object
+      description: A confirmation with a human-readable `message`.
+      required: [message]
+      additionalProperties: false
+      properties:
+        message:
+          type: string
+          description: For display only; clients branch on the HTTP status.
 
     ErrorMessage:
       type: object
