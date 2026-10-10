@@ -31,18 +31,40 @@ class OpenApiContract
             ? $responses->{$status}->{'$ref'}
             : '#/paths/'.self::escape($path).'/'.$method.'/responses/'.$status;
 
-        $result = self::validator()->validate(
-            json_decode($response->getContent()),
-            (object) ['$ref' => self::SPEC_ID.$base.'/content/application~1json/schema'],
-        );
+        // Bodiless responses (204, 202, redirects) document no content.
+        if (! isset(self::resolve($base)->content)) {
+            $response->isRedirection()
+                ? Assert::assertTrue($response->headers->has('Location'), "{$method} {$path} must redirect with a Location header.")
+                : Assert::assertSame('', $response->getContent(), "The contract documents no body for status {$status} of {$method} {$path}.");
 
-        Assert::assertTrue($result->isValid(), 'Response does not match the OpenAPI contract: '.json_encode(
-            $result->isValid() ? [] : (new ErrorFormatter)->format($result->error()),
+            return;
+        }
+
+        $errors = self::schemaErrors(json_decode($response->getContent()), $base.'/content/application~1json/schema');
+
+        Assert::assertNull($errors, 'Response does not match the OpenAPI contract: '.json_encode(
+            $errors,
             JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE,
         ));
     }
 
-    private static function spec(): object
+    /**
+     * Validates decoded JSON against the schema at a JSON pointer in the spec, e.g.
+     * "#/components/schemas/Customer". Returns null when valid, otherwise the formatted errors.
+     *
+     * @return array<string, mixed>|null
+     */
+    public static function schemaErrors(mixed $data, string $pointer): ?array
+    {
+        $result = self::validator()->validate($data, (object) ['$ref' => self::SPEC_ID.$pointer]);
+
+        return $result->isValid() ? null : (new ErrorFormatter)->format($result->error());
+    }
+
+    /**
+     * The spec as decoded JSON objects (YAML mappings become stdClass).
+     */
+    public static function spec(): object
     {
         return self::$spec ??= json_decode(json_encode(Yaml::parseFile(base_path('docs/api/openapi.yaml'))));
     }
@@ -57,8 +79,23 @@ class OpenApiContract
         return self::$validator;
     }
 
+    /**
+     * Follows a local JSON pointer such as "#/components/responses/Unauthenticated".
+     */
+    public static function resolve(string $pointer): mixed
+    {
+        $node = self::spec();
+
+        foreach (array_slice(explode('/', $pointer), 1) as $segment) {
+            $node = $node->{str_replace(['~1', '~0'], ['/', '~'], rawurldecode($segment))};
+        }
+
+        return $node;
+    }
+
     private static function escape(string $segment): string
     {
-        return str_replace(['~', '/'], ['~0', '~1'], $segment);
+        // Braces are percent-encoded so path templates such as {id} are not read as URI templates.
+        return str_replace(['~', '/', '{', '}'], ['~0', '~1', '%7B', '%7D'], $segment);
     }
 }

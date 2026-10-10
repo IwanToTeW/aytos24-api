@@ -1,0 +1,39 @@
+# Isolated API instance for frontend end-to-end tests (aytos24-app: npm run test:e2e:live).
+#
+# Runs next to the normal stack on http://localhost:8001 with its own database (`e2e`), so tests
+# never touch development data. Start and (re)seed it with: bin/e2e-env
+# See docs/e2e-testing.md.
+
+services:
+  app-e2e:
+    build:
+      context: .
+      args:
+        UID: ${UID:-1000}
+        GID: ${GID:-1000}
+    volumes:
+      - .:/var/www/html
+    environment:
+      # Real environment variables take precedence over .env.
+      APP_ENV: testing
+      APP_DEBUG: "false"
+      APP_URL: http://localhost:8001
+      DB_DATABASE: e2e
+      # Array stores reset on every request: no rate limiting, no shared session/cache state.
+      CACHE_STORE: array
+      SESSION_DRIVER: array
+      QUEUE_CONNECTION: sync
+      CORS_ALLOWED_ORIGINS: ${E2E_CORS_ALLOWED_ORIGINS:-http://localhost:5175}
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  nginx-e2e:
+    image: nginx:1.27-alpine
+    ports:
+      - "${E2E_APP_PORT:-8001}:80"
+    volumes:
+      - .:/var/www/html:ro
+      - ./docker/nginx/e2e.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - app-e2e

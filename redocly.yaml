@@ -14,6 +14,10 @@ rules:
   no-unresolved-refs: error
   no-unused-components: error
   operation-operationId: error
+  # Browser-navigation endpoints (email verification link, social sign-in) answer only with
+  # redirects. tests/Feature/Api/V1/Auth/AuthenticationContractTest.php requires a 2XX on
+  # every other operation.
+  operation-2xx-response: off
   # Proprietary API: no public licence to declare.
   info-license: off
   info-license-url: off

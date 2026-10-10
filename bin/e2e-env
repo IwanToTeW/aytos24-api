@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Start the isolated e2e API instance (compose.e2e.yaml, http://localhost:8001) and reset its
+# dedicated `e2e` database to the deterministic DevelopmentFoodSeeder data for *today*
+# (Europe/Sofia). Never touches the development database. See docs/e2e-testing.md.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+compose=(docker compose -f compose.yaml -f compose.e2e.yaml)
+port="${E2E_APP_PORT:-8001}"
+
+echo "› Starting mysql, app-e2e and nginx-e2e…"
+"${compose[@]}" up -d --build --wait app-e2e nginx-e2e
+
+echo "› Ensuring the dedicated e2e database exists…"
+"${compose[@]}" exec -T mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" 2>/dev/null <<SQL
+CREATE DATABASE IF NOT EXISTS e2e;
+GRANT ALL PRIVILEGES ON e2e.* TO "$MYSQL_USER"@"%";
+SQL'
+
+echo "› Resetting and seeding the e2e database…"
+# Guard: the destructive reset only ever runs against the e2e database in the testing environment.
+"${compose[@]}" exec -T app-e2e sh -c '
+  [ "$DB_DATABASE" = "e2e" ] && [ "$APP_ENV" = "testing" ] || {
+    echo "Refusing to reset: expected DB_DATABASE=e2e and APP_ENV=testing (got $DB_DATABASE / $APP_ENV)." >&2
+    exit 1
+  }
+  php artisan migrate:fresh --force --no-interaction
+  php artisan db:seed --class=DevelopmentFoodSeeder --force --no-interaction
+'
+
+echo "› Checking the API…"
+for _ in $(seq 1 20); do
+  if curl -sf "http://localhost:${port}/api/v1/meals/today?per_page=1" >/dev/null; then
+    echo "✓ e2e API ready on http://localhost:${port}/api (data for $(TZ=Europe/Sofia date +%F))"
+    exit 0
+  fi
+  sleep 1
+done
+echo "✗ e2e API did not respond on http://localhost:${port}" >&2
+exit 1

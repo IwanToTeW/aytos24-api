@@ -28,9 +28,22 @@ info:
 
     ## Authentication
 
-    All endpoints in this document are public and read-only. No
+    Food discovery endpoints (tag `Meals`) are public and read-only. No
     authentication is required, and no credentials, cookies or API keys
-    should be sent.
+    should be sent to them.
+
+    Customer authentication (tags `Authentication`, `Social authentication`
+    and `Profile`) is described in full in `docs/api/authentication.md`.
+    Browser clients use Laravel Sanctum's cookie-based session
+    (`browserSession`); future native clients will use Sanctum bearer tokens
+    (`nativeToken`). Both identify the same customer account.
+
+    ## Implementation status
+
+    Every operation carries `x-implementation-status`: `implemented` means
+    the endpoint is live; `contract-only` means the contract is agreed but
+    the endpoint does not exist yet (`x-implemented-in` names the ticket that
+    delivers it). Clients must not call `contract-only` endpoints.
 
     ## Prices
 
@@ -62,7 +75,8 @@ info:
     address**. Each response carries `X-RateLimit-Limit` and
     `X-RateLimit-Remaining` headers. When the limit is exceeded the API
     responds with `429 Too Many Requests` and a `Retry-After` header giving
-    the number of seconds to wait.
+    the number of seconds to wait. Authentication endpoints have additional,
+    stricter limits listed in `docs/api/authentication.md`.
   contact:
     name: Aytos24
 
@@ -75,12 +89,19 @@ security: []
 tags:
   - name: Meals
     description: Daily lunch menu discovery across all participating restaurants.
+  - name: Authentication
+    description: Customer registration, sign-in, sessions, email verification and password recovery.
+  - name: Social authentication
+    description: Backend-controlled sign-in with Google, Facebook and Apple (browser navigations, not XHR).
+  - name: Profile
+    description: The authenticated customer's own profile.
 
 paths:
   /v1/meals/today:
     get:
       tags: [Meals]
       operationId: listTodayMeals
+      x-implementation-status: implemented
       summary: List today's lunch meals
       description: |
         Returns a paginated list of the lunch meals offered today by all
@@ -278,6 +299,816 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
+  /sanctum/csrf-cookie:
+    servers:
+      - url: http://localhost:8000
+        description: Application root. This Sanctum route is not under /api and not versioned.
+    get:
+      tags: [Authentication]
+      operationId: initializeCsrfProtection
+      x-implementation-status: contract-only
+      x-implemented-in: BE-007
+      summary: Initialise CSRF protection (browser only)
+      description: |
+        Provided by Laravel Sanctum; it is **not** part of the versioned API.
+        Browser clients call it once before their first state-changing
+        request (and again after a `419`). It starts a session and sets the
+        `XSRF-TOKEN` cookie, whose value the client sends back in the
+        `X-XSRF-TOKEN` header. Native clients never call it.
+
+        Rate limit: 60 requests per minute per IP address (each call can
+        create a database session row).
+      security: []
+      responses:
+        '204':
+          description: Session and `XSRF-TOKEN` cookies set. No body.
+          headers:
+            Set-Cookie:
+              $ref: '#/components/headers/Set-Cookie'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /v1/auth/register:
+    post:
+      tags: [Authentication]
+      operationId: registerCustomer
+      x-implementation-status: contract-only
+      x-implemented-in: BE-006
+      summary: Register a customer with email and password
+      description: |
+        Creates a customer, sends the email verification link and starts an
+        authenticated browser session (the session ID is regenerated). The
+        new customer is unverified (`email_verified: false`) but may use every
+        authenticated endpoint in this document; actions that need a
+        verified email (for example placing an order) enforce it separately
+        with `403`.
+
+        If the request already carries an authenticated session, that
+        customer is signed out first.
+
+        Duplicate emails are reported (`422` on `email`): registration is the
+        one place where the existence of an account is revealed, mitigated by
+        rate limiting. Emails are trimmed and lowercased before the
+        uniqueness check.
+
+        Rate limit: 10 requests per hour per IP address.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/XsrfToken'
+        - $ref: '#/components/parameters/AcceptLanguage'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+            examples:
+              register:
+                summary: New customer
+                value:
+                  name: Ivan
+                  email: ivan@example.com
+                  password: ExamplePassword123!
+                  password_confirmation: ExamplePassword123!
+      responses:
+        '201':
+          description: Customer created and signed in. The verification email has been queued.
+          headers:
+            Set-Cookie:
+              $ref: '#/components/headers/Set-Cookie'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerResource'
+              examples:
+                registered:
+                  summary: Newly registered, unverified customer
+                  value:
+                    data:
+                      id: 123
+                      name: Ivan
+                      email: ivan@example.com
+                      email_verified: false
+                      phone: null
+                      created_at: '2026-10-10T09:00:00Z'
+        '419':
+          $ref: '#/components/responses/CsrfTokenMismatch'
+        '422':
+          description: Validation failed. `errors` names every invalid field.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+              examples:
+                emailTaken:
+                  summary: Email already registered
+                  value:
+                    message: The email has already been taken.
+                    errors:
+                      email:
+                        - The email has already been taken.
+                multipleFields:
+                  summary: Several invalid fields
+                  value:
+                    message: The name field is required. (and 2 more errors)
+                    errors:
+                      name:
+                        - The name field is required.
+                      email:
+                        - The email field must be a valid email address.
+                      password:
+                        - The password field confirmation does not match.
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v1/auth/login:
+    post:
+      tags: [Authentication]
+      operationId: loginCustomer
+      x-implementation-status: contract-only
+      x-implemented-in: BE-007
+      summary: Sign in with email and password
+      description: |
+        Authenticates the customer and starts a browser session. The session
+        ID and CSRF token are regenerated. With `remember: true` a long-lived
+        remember-me cookie keeps the customer signed in after the idle
+        session expires.
+
+        Wrong email, wrong password, an unknown email and a social-only
+        account without a password all produce the **same** `422` response,
+        so the endpoint does not reveal whether an account exists.
+
+        If the request already carries an authenticated session, that
+        customer is signed out first.
+
+        Rate limit: 5 failed attempts per minute per email and IP address
+        combination, and 20 requests per minute per IP address.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/XsrfToken'
+        - $ref: '#/components/parameters/AcceptLanguage'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            examples:
+              login:
+                summary: Email and password
+                value:
+                  email: ivan@example.com
+                  password: ExamplePassword123!
+              remembered:
+                summary: Stay signed in on this device
+                value:
+                  email: ivan@example.com
+                  password: ExamplePassword123!
+                  remember: true
+      responses:
+        '200':
+          description: Signed in.
+          headers:
+            Set-Cookie:
+              $ref: '#/components/headers/Set-Cookie'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerResource'
+              examples:
+                signedIn:
+                  summary: Signed-in customer
+                  value:
+                    data:
+                      id: 123
+                      name: Ivan
+                      email: ivan@example.com
+                      email_verified: true
+                      phone: null
+                      created_at: '2026-10-10T09:00:00Z'
+        '419':
+          $ref: '#/components/responses/CsrfTokenMismatch'
+        '422':
+          description: |
+            Validation failed, or the credentials are invalid. Invalid
+            credentials are always reported on `email`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+              examples:
+                invalidCredentials:
+                  summary: Wrong email or password (identical for unknown accounts)
+                  value:
+                    message: These credentials do not match our records.
+                    errors:
+                      email:
+                        - These credentials do not match our records.
+                missingPassword:
+                  summary: Missing field
+                  value:
+                    message: The password field is required.
+                    errors:
+                      password:
+                        - The password field is required.
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v1/auth/logout:
+    post:
+      tags: [Authentication]
+      operationId: logoutCustomer
+      x-implementation-status: contract-only
+      x-implemented-in: BE-007
+      summary: Sign out of the current session or device
+      description: |
+        Browser session: signs out, invalidates the session, regenerates the
+        CSRF token and expires the remember-me cookie. Native token: revokes
+        only the token used for this request. Other browsers and devices of
+        the same customer stay signed in.
+
+        Clients should treat a `401` from this endpoint as "already signed
+        out".
+      security:
+        - browserSession: []
+        - nativeToken: []
+      parameters:
+        - $ref: '#/components/parameters/XsrfToken'
+      responses:
+        '204':
+          description: Signed out. No body.
+          headers:
+            Set-Cookie:
+              $ref: '#/components/headers/Set-Cookie'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '419':
+          $ref: '#/components/responses/CsrfTokenMismatch'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v1/auth/user:
+    get:
+      tags: [Authentication]
+      operationId: getAuthenticatedCustomer
+      x-implementation-status: contract-only
+      x-implemented-in: BE-007
+      summary: Get the authenticated customer
+      description: |
+        Returns the signed-in customer. The web app calls it on start-up to
+        restore the session; a `401` means "not signed in" and is not an
+        error to report. Identical in shape to `GET /v1/me`.
+      security:
+        - browserSession: []
+        - nativeToken: []
+      parameters:
+        - $ref: '#/components/parameters/AcceptLanguage'
+      responses:
+        '200':
+          $ref: '#/components/responses/Customer'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v1/auth/forgot-password:
+    post:
+      tags: [Authentication]
+      operationId: requestPasswordReset
+      x-implementation-status: contract-only
+      x-implemented-in: BE-009
+      summary: Request a password reset email
+      description: |
+        If an account with this email exists, a reset link valid for 60
+        minutes is emailed (at most one per email per minute). The response
+        is **identical** whether or not the account exists, and whether or
+        not an email was actually sent. The reset token is never returned.
+
+        Customers created through social sign-in, who have no password, use
+        this flow to set one.
+
+        Rate limit: 5 requests per hour per email address and 20 per hour
+        per IP address.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/XsrfToken'
+        - $ref: '#/components/parameters/AcceptLanguage'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ForgotPasswordRequest'
+            examples:
+              forgot:
+                summary: Request a reset link
+                value:
+                  email: ivan@example.com
+      responses:
+        '202':
+          description: Accepted. No body. Returned for known and unknown emails alike.
+        '419':
+          $ref: '#/components/responses/CsrfTokenMismatch'
+        '422':
+          description: The email is missing or malformed. Never reports unknown accounts.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+              examples:
+                invalidEmail:
+                  summary: Malformed email
+                  value:
+                    message: The email field must be a valid email address.
+                    errors:
+                      email:
+                        - The email field must be a valid email address.
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v1/auth/reset-password:
+    post:
+      tags: [Authentication]
+      operationId: resetPassword
+      x-implementation-status: contract-only
+      x-implemented-in: BE-009
+      summary: Set a new password with a reset token
+      description: |
+        Sets a new password using the token from the reset email. The token
+        is single-use and expires 60 minutes after it was issued. A
+        successful reset deletes the token, signs the customer out of every
+        browser session, revokes every native token and rotates the
+        remember-me token. The customer is **not** signed in; the client
+        sends them to the sign-in page.
+
+        Invalid, expired and already-used tokens, and tokens that do not
+        belong to the given email (including unknown emails), all produce the
+        same `422` error on `token`.
+
+        Rate limit: 5 requests per minute per IP address.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/XsrfToken'
+        - $ref: '#/components/parameters/AcceptLanguage'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResetPasswordRequest'
+            examples:
+              reset:
+                summary: New password
+                value:
+                  email: ivan@example.com
+                  token: reset-token
+                  password: NewExamplePassword123!
+                  password_confirmation: NewExamplePassword123!
+      responses:
+        '204':
+          description: Password changed. No body.
+        '419':
+          $ref: '#/components/responses/CsrfTokenMismatch'
+        '422':
+          description: Validation failed, or the token is invalid or expired.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+              examples:
+                invalidToken:
+                  summary: Invalid, expired or used token
+                  value:
+                    message: This password reset token is invalid.
+                    errors:
+                      token:
+                        - This password reset token is invalid.
+                weakPassword:
+                  summary: Password policy not met
+                  value:
+                    message: The password field must be at least 8 characters.
+                    errors:
+                      password:
+                        - The password field must be at least 8 characters.
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v1/auth/verify-email/{id}/{hash}:
+    get:
+      tags: [Authentication]
+      operationId: verifyEmail
+      x-implementation-status: contract-only
+      x-implemented-in: BE-006
+      summary: Verify an email address (signed link from the email)
+      description: |
+        Opened by the customer from the verification email, in any browser
+        and without being signed in. It is a browser navigation, not an XHR
+        call: it never returns JSON for the outcome, but always redirects to
+        the frontend at `{FRONTEND_URL}/email-verified?status=<status>`.
+
+        | `status` | Meaning |
+        | --- | --- |
+        | `verified` | The email is now verified. |
+        | `already-verified` | It was verified before; nothing changed. |
+        | `expired` | The link is older than 24 hours. Sign in and request a new one. |
+        | `invalid` | Bad signature, unknown customer, or the email changed since the link was sent. |
+
+        The link never signs the customer in.
+      security: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Customer ID.
+          schema:
+            type: integer
+            minimum: 1
+          example: 123
+        - name: hash
+          in: path
+          required: true
+          description: SHA-1 hex digest of the customer's email address at the time the link was sent.
+          schema:
+            type: string
+            pattern: '^[a-f0-9]{40}$'
+          example: 9f0d4c3b5c0f0a4f5d3e1e8a7b2c6d9e0f1a2b3c
+        - name: expires
+          in: query
+          required: true
+          description: Expiry of the signed link (Unix timestamp).
+          schema:
+            type: integer
+          example: 1791709200
+        - name: signature
+          in: query
+          required: true
+          description: HMAC signature of the URL generated by Laravel.
+          schema:
+            type: string
+            pattern: '^[a-f0-9]{64}$'
+          example: 4f1c0a6a0e2b7d1c9e3f5a7b9c1d3e5f7a9b1c3d5e7f9a1b3c5d7e9f1a3b5c7d
+      responses:
+        '302':
+          description: Redirect to the frontend with the outcome in `status`.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /v1/auth/email/verification-notification:
+    post:
+      tags: [Authentication]
+      operationId: resendVerificationEmail
+      x-implementation-status: contract-only
+      x-implemented-in: BE-006
+      summary: Resend the email verification link
+      description: |
+        Queues a new verification email for the signed-in customer. When the
+        email is already verified nothing is sent and the response is the
+        same.
+
+        Rate limit: 6 requests per minute per customer.
+      security:
+        - browserSession: []
+        - nativeToken: []
+      parameters:
+        - $ref: '#/components/parameters/XsrfToken'
+        - $ref: '#/components/parameters/AcceptLanguage'
+      responses:
+        '202':
+          description: Accepted. No body.
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '419':
+          $ref: '#/components/responses/CsrfTokenMismatch'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /v1/auth/social/{provider}/redirect:
+    get:
+      tags: [Social authentication]
+      operationId: startSocialAuthentication
+      x-implementation-status: contract-only
+      x-implemented-in: BE-008
+      summary: Start sign-in with a social provider
+      description: |
+        A top-level browser navigation (`window.location.assign`), never an
+        XHR call. Generates the OAuth `state`, stores it together with the
+        validated `intended` path and `remember` flag in a short-lived
+        encrypted cookie, and redirects to the provider's consent screen.
+
+        An `intended` value that is not a safe frontend path is replaced by
+        `/` rather than rejected.
+
+        Rate limit: 20 requests per minute per IP address.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/SocialProvider'
+        - name: intended
+          in: query
+          required: false
+          description: |
+            Frontend path to return to after sign-in, for example
+            `/checkout`. Must start with a single `/`; absolute URLs,
+            protocol-relative URLs (`//…`), backslashes, control characters
+            and the auth pages themselves (`/login`, `/register`, `/auth/…`)
+            are replaced by `/`. Maximum 2,048 characters.
+          schema:
+            type: string
+            maxLength: 2048
+          example: /checkout
+        - name: remember
+          in: query
+          required: false
+          description: Keep the customer signed in on this browser (as `remember` on login).
+          schema:
+            type: boolean
+            default: false
+          example: true
+      responses:
+        '302':
+          description: Redirect to the provider's authorization page.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            Set-Cookie:
+              $ref: '#/components/headers/Set-Cookie'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /v1/auth/social/{provider}/callback:
+    get:
+      tags: [Social authentication]
+      operationId: handleSocialCallback
+      x-implementation-status: contract-only
+      x-implemented-in: BE-008
+      summary: OAuth callback for Google and Facebook (query response mode)
+      description: |
+        The provider redirects the browser here. The backend validates
+        `state`, exchanges `code` for the provider identity, applies the
+        account identity rules in `docs/api/authentication.md`, starts the
+        session and **always** answers with a `303` redirect to the
+        frontend, described by `x-frontend-redirect`. No provider or Aytos24
+        token is ever placed in the redirect.
+
+        Apple uses `POST` for this path; `GET` with `provider=apple` returns
+        `404`.
+      x-frontend-redirect:
+        url: '{FRONTEND_URL}/auth/social/callback'
+        query:
+          type: object
+          description: |
+            Query parameters of the frontend URL that the social callback
+            redirects to (`{FRONTEND_URL}/auth/social/callback`). They never
+            contain tokens or personal data.
+          required: [status, provider]
+          properties:
+            status:
+              type: string
+              enum: [success, error]
+            provider:
+              type: string
+              enum: [google, facebook, apple]
+            intended:
+              type: string
+              description: The validated `intended` path from the redirect endpoint, `/` by default.
+            new_account:
+              type: boolean
+              description: With `status=success`, `true` when this sign-in created the customer account.
+            error:
+              type: string
+              description: With `status=error`, the reason. See `docs/api/authentication.md`.
+              enum:
+                - cancelled
+                - invalid_state
+                - provider_error
+                - email_missing
+                - account_exists
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/QueryCallbackProvider'
+        - name: code
+          in: query
+          required: false
+          description: Authorization code. Absent when the provider reports an error.
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: false
+          description: The `state` generated by the redirect endpoint.
+          schema:
+            type: string
+        - name: error
+          in: query
+          required: false
+          description: Provider error, e.g. `access_denied` when the customer cancels.
+          schema:
+            type: string
+      responses:
+        '303':
+          description: Redirect to the frontend social callback page with the outcome.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            Set-Cookie:
+              $ref: '#/components/headers/Set-Cookie'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+    post:
+      tags: [Social authentication]
+      operationId: handleSocialFormPostCallback
+      x-implementation-status: contract-only
+      x-implemented-in: BE-008
+      summary: OAuth callback for Apple (form_post response mode)
+      description: |
+        Apple requires `response_mode=form_post` when the name or email
+        scope is requested, so Apple posts the result here as a cross-site
+        form submission. That request carries no session cookie
+        (`SameSite=Lax`) and no CSRF token: it is excluded from CSRF
+        verification and protected instead by the `state` cookie set with
+        `SameSite=None; Secure`. The outcome is the same `303` redirect as
+        the `GET` callback.
+
+        `GET` and `POST` callbacks for Google and Facebook return `404` here.
+      x-frontend-redirect:
+        $ref: '#/paths/~1v1~1auth~1social~1{provider}~1callback/get/x-frontend-redirect'
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/FormPostCallbackProvider'
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/AppleCallbackForm'
+            examples:
+              firstSignIn:
+                summary: First authorization (includes the user's name)
+                value:
+                  state: 3f6c1b2e9d8a4c7f
+                  code: c1a2b3d4e5f6.0.abcd.EXAMPLE
+                  id_token: eyJraWQiOiJFWEFNUExFIn0.eyJzdWIiOiIwMDEyMzQuZXhhbXBsZSJ9.c2lnbmF0dXJl
+                  user: '{"name":{"firstName":"Ivan","lastName":"Totev"},"email":"x7k2p9@privaterelay.appleid.com"}'
+              cancelled:
+                summary: The customer cancelled
+                value:
+                  state: 3f6c1b2e9d8a4c7f
+                  error: user_cancelled_authorize
+      responses:
+        '303':
+          description: Redirect to the frontend social callback page with the outcome.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            Set-Cookie:
+              $ref: '#/components/headers/Set-Cookie'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /v1/me:
+    get:
+      tags: [Profile]
+      operationId: getProfile
+      x-implementation-status: contract-only
+      x-implemented-in: BE-010
+      summary: Get the customer's profile
+      description: Returns the signed-in customer. Same representation as `GET /v1/auth/user`.
+      security:
+        - browserSession: []
+        - nativeToken: []
+      parameters:
+        - $ref: '#/components/parameters/AcceptLanguage'
+      responses:
+        '200':
+          $ref: '#/components/responses/Customer'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+    patch:
+      tags: [Profile]
+      operationId: updateProfile
+      x-implementation-status: contract-only
+      x-implemented-in: BE-010
+      summary: Update the customer's profile
+      description: |
+        Partial update of the signed-in customer's own profile. There is no
+        customer ID in the path: a customer can only ever change their own
+        profile.
+
+        | In the request body | Effect |
+        | --- | --- |
+        | field absent | unchanged |
+        | `name`: string | trimmed and saved; `null` or empty is rejected |
+        | `phone`: string | normalised to E.164 and saved |
+        | `phone`: `null` or `""` | phone removed |
+        | `email` or `password` present | `422` (`prohibited`): these change through dedicated flows |
+        | any other field (e.g. `id`, `email_verified`) | ignored |
+
+        An empty body `{}` is valid and returns the unchanged customer.
+
+        Phone input may contain spaces, dashes, dots and parentheses. A
+        leading `00` is read as `+`, and a leading single `0` as the
+        Bulgarian country code `+359`. The result must be a valid E.164
+        number (`+` and 8–15 digits), otherwise `422`.
+      security:
+        - browserSession: []
+        - nativeToken: []
+      parameters:
+        - $ref: '#/components/parameters/XsrfToken'
+        - $ref: '#/components/parameters/AcceptLanguage'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProfileRequest'
+            examples:
+              nameAndPhone:
+                summary: Set name and phone
+                value:
+                  name: Ivan Totev
+                  phone: '+359888123456'
+              nationalPhone:
+                summary: Bulgarian national format (saved as +359888123456)
+                value:
+                  phone: 0888 123 456
+              removePhone:
+                summary: Remove the phone number
+                value:
+                  phone: null
+      responses:
+        '200':
+          description: The updated customer.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerResource'
+              examples:
+                updated:
+                  summary: Name and phone updated
+                  value:
+                    data:
+                      id: 123
+                      name: Ivan Totev
+                      email: ivan@example.com
+                      email_verified: true
+                      phone: '+359888123456'
+                      created_at: '2026-10-10T09:00:00Z'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '419':
+          $ref: '#/components/responses/CsrfTokenMismatch'
+        '422':
+          description: Validation failed. `errors` names every invalid field.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+              examples:
+                invalidPhone:
+                  summary: Not a valid phone number
+                  value:
+                    message: The phone field must be a valid phone number.
+                    errors:
+                      phone:
+                        - The phone field must be a valid phone number.
+                emailProhibited:
+                  summary: Attempt to change the email
+                  value:
+                    message: The email field is prohibited.
+                    errors:
+                      email:
+                        - The email field is prohibited.
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
 components:
   parameters:
     CategoryFilter:
@@ -327,6 +1158,58 @@ components:
         maximum: 50
         default: 20
       example: 20
+    XsrfToken:
+      name: X-XSRF-TOKEN
+      in: header
+      required: false
+      description: |
+        Browser clients only: the URL-decoded value of the `XSRF-TOKEN`
+        cookie set by `GET /sanctum/csrf-cookie`. Required on every
+        state-changing browser request (Axios sends it automatically with
+        `withCredentials` and `withXSRFToken`). Missing or stale values
+        return `419`. Native clients using a bearer token omit it.
+      schema:
+        type: string
+    AcceptLanguage:
+      name: Accept-Language
+      in: header
+      required: false
+      description: |
+        Preferred language for messages in the response and for emails sent
+        as a result of the request. Supported: `bg` and `en`; without a
+        supported value the application default (`APP_LOCALE`, `bg` in
+        production) is used. Response structure never depends on the
+        language.
+      schema:
+        type: string
+      example: bg
+    SocialProvider:
+      name: provider
+      in: path
+      required: true
+      description: Social sign-in provider. Any other value returns `404`.
+      schema:
+        type: string
+        enum: [google, facebook, apple]
+      example: google
+    QueryCallbackProvider:
+      name: provider
+      in: path
+      required: true
+      description: Providers that return to the callback with a `GET` (query response mode).
+      schema:
+        type: string
+        enum: [google, facebook]
+      example: google
+    FormPostCallbackProvider:
+      name: provider
+      in: path
+      required: true
+      description: Providers that return to the callback with a `POST` (form_post response mode).
+      schema:
+        type: string
+        enum: [apple]
+      example: apple
 
   headers:
     X-RateLimit-Limit:
@@ -347,6 +1230,18 @@ components:
         type: integer
         minimum: 1
       example: 30
+    Location:
+      description: Absolute URL the browser is redirected to.
+      schema:
+        type: string
+        format: uri
+    Set-Cookie:
+      description: |
+        Session, `XSRF-TOKEN`, remember-me or OAuth state cookies. The
+        session, remember-me and OAuth state cookies are `HttpOnly`; all are
+        `Secure` in production. Their values are opaque to clients.
+      schema:
+        type: string
 
   responses:
     ValidationFailed:
@@ -416,6 +1311,62 @@ components:
               summary: Maintenance mode
               value:
                 message: Service Unavailable
+    Customer:
+      description: The authenticated customer.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/CustomerResource'
+          examples:
+            customer:
+              summary: Verified customer without a phone number
+              value:
+                data:
+                  id: 123
+                  name: Ivan
+                  email: ivan@example.com
+                  email_verified: true
+                  phone: null
+                  created_at: '2026-10-10T09:00:00Z'
+    Unauthenticated:
+      description: |
+        No valid session or token: never signed in, signed out, or the
+        session or token expired or was revoked. The client should treat the
+        customer as signed out.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorMessage'
+          examples:
+            unauthenticated:
+              summary: Not signed in
+              value:
+                message: Unauthenticated.
+    CsrfTokenMismatch:
+      description: |
+        Browser clients only: the `X-XSRF-TOKEN` header is missing or does
+        not match the session (for example because the session expired).
+        Call `GET /sanctum/csrf-cookie` and retry the request once.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorMessage'
+          examples:
+            csrfMismatch:
+              summary: Missing or stale CSRF token
+              value:
+                message: CSRF token mismatch.
+    NotFound:
+      description: Unknown or unsupported provider, or the provider does not use this HTTP method.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorMessage'
+          examples:
+            notFound:
+              summary: Unsupported provider
+              value:
+                message: Not Found
 
   schemas:
     MealCollection:
@@ -644,3 +1595,202 @@ components:
         message:
           type: string
           description: Generic human-readable error message.
+
+    Customer:
+      type: object
+      description: |
+        The customer representation used by every authentication and profile
+        endpoint. It deliberately contains no password hash, remember-me
+        token, OAuth token, linked provider identifiers or other security
+        metadata. Fields are never added without updating this contract.
+      additionalProperties: false
+      required: [id, name, email, email_verified, phone, created_at]
+      properties:
+        id:
+          type: integer
+          minimum: 1
+          description: Customer identifier.
+          examples: [123]
+        name:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 255
+          description: |
+            Display name. Always set for email registrations. `null` only for
+            social sign-ins where the provider shared no name (possible with
+            Apple); the client should ask for it with `PATCH /v1/me`.
+          examples: [Ivan]
+        email:
+          type: string
+          format: email
+          maxLength: 255
+          description: |
+            Sign-in and contact email, lowercased. May be an Apple private
+            relay address (`…@privaterelay.appleid.com`).
+          examples: [ivan@example.com]
+        email_verified:
+          type: boolean
+          description: Whether the customer has proven ownership of `email`.
+        phone:
+          type: [string, 'null']
+          pattern: '^\+[1-9][0-9]{7,14}$'
+          description: Phone number in E.164 format, or `null` if not provided.
+          examples: ['+359888123456']
+        created_at:
+          type: string
+          format: date-time
+          pattern: 'Z$'
+          description: When the account was created, RFC 3339 in UTC.
+          examples: ['2026-10-10T09:00:00Z']
+
+    CustomerResource:
+      type: object
+      description: A single customer wrapped in `data`.
+      required: [data]
+      properties:
+        data:
+          $ref: '#/components/schemas/Customer'
+
+    RegisterRequest:
+      type: object
+      required: [name, email, password, password_confirmation]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Trimmed before validation.
+        email:
+          type: string
+          format: email
+          maxLength: 255
+          description: Trimmed and lowercased; must not belong to an existing customer.
+        password:
+          $ref: '#/components/schemas/NewPassword'
+        password_confirmation:
+          type: string
+          description: Must equal `password`.
+        remember:
+          type: boolean
+          default: false
+          description: Keep the customer signed in on this browser.
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 255
+        password:
+          type: string
+          minLength: 1
+          description: Checked only against the stored hash; the password policy is not applied at login.
+        remember:
+          type: boolean
+          default: false
+          description: Keep the customer signed in on this browser after the idle session expires.
+
+    ForgotPasswordRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 255
+
+    ResetPasswordRequest:
+      type: object
+      required: [email, token, password, password_confirmation]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 255
+        token:
+          type: string
+          minLength: 1
+          description: The token from the reset link.
+        password:
+          $ref: '#/components/schemas/NewPassword'
+        password_confirmation:
+          type: string
+          description: Must equal `password`.
+
+    NewPassword:
+      type: string
+      minLength: 8
+      maxLength: 128
+      description: |
+        Password policy: 8–128 characters, at least one letter and one
+        digit, and (in production) not found in known data breaches
+        (Have I Been Pwned k-anonymity check).
+
+    UpdateProfileRequest:
+      type: object
+      description: |
+        Partial update. Absent fields are unchanged; `email` and `password`
+        are prohibited; other unknown fields are ignored.
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Trimmed before validation. Cannot be removed.
+        phone:
+          type: [string, 'null']
+          maxLength: 32
+          description: Any common notation; normalised to E.164. `null` or `""` removes it.
+
+    AppleCallbackForm:
+      type: object
+      description: Fields Apple posts to the callback (`response_mode=form_post`).
+      required: [state]
+      properties:
+        state:
+          type: string
+        code:
+          type: string
+          description: Authorization code, absent on error.
+        id_token:
+          type: string
+          description: Apple identity token (JWT) with `sub`, `email` and `email_verified`.
+        user:
+          type: string
+          description: |
+            JSON with the customer's name and email. Sent **only on the first
+            authorization** of Aytos24 by this Apple ID.
+        error:
+          type: string
+          description: '`user_cancelled_authorize` when the customer cancels.'
+
+    ErrorMessage:
+      type: object
+      description: A non-validation error with a human-readable `message`.
+      required: [message]
+      properties:
+        message:
+          type: string
+          description: For display or logging only; clients branch on the HTTP status.
+
+  securitySchemes:
+    browserSession:
+      type: apiKey
+      in: cookie
+      name: aytos24_session
+      description: |
+        Laravel Sanctum stateful (SPA) authentication for the Vue web app:
+        an `HttpOnly`, `Secure`, `SameSite=Lax` session cookie, plus the
+        `X-XSRF-TOKEN` header on state-changing requests. Requires a request
+        from an origin listed in `SANCTUM_STATEFUL_DOMAINS` with credentials
+        included. The cookie is set by `GET /sanctum/csrf-cookie`, register,
+        login and the social callback; it is never read by JavaScript.
+    nativeToken:
+      type: http
+      scheme: bearer
+      description: |
+        Future Capacitor apps: a Sanctum personal access token in the
+        `Authorization: Bearer` header, kept in secure device storage.
+        Token issuance is not part of this contract version.
